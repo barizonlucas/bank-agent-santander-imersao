@@ -1,4 +1,5 @@
 from app.config import GEMINI_API_KEY, GEMINI_MODEL
+from app.pages import compute_static_version, render_page
 from tests.fake_gemini import FakeClient, make_agent, text, tool_call
 
 SESSION_ID = "session-test-123"
@@ -64,3 +65,26 @@ def test_history_and_governance(make_client):
 
     assert client.post("/api/reset", json={"session_id": SESSION_ID}).json()["messages"] == []
     assert client.get("/api/governance").json()["total_messages"] == 2  # the audit trail is not erased
+
+
+def test_pages_reference_assets_with_a_content_hash(make_client):
+    client = make_client()
+    version = client.app.state.static_version
+    index, governance = client.get("/"), client.get("/governance")
+    assert f"/static/app.js?v={version}" in index.text and f"/static/styles.css?v={version}" in index.text
+    assert f"/static/governance.js?v={version}" in governance.text
+    assert index.headers["cache-control"] == "no-cache"  # HTML itself must never be served stale
+
+
+def test_static_version_changes_when_an_asset_changes(tmp_path):
+    (tmp_path / "app.js").write_text("one")
+    before = compute_static_version(tmp_path)
+    (tmp_path / "app.js").write_text("two")
+    assert compute_static_version(tmp_path) != before
+
+
+def test_render_page_only_touches_local_css_and_js(tmp_path):
+    page = tmp_path / "page.html"
+    page.write_text('<script src="/static/app.js"></script><a href="/pitch">x</a><link href="https://cdn.x/a.js">')
+    html = render_page(page, "abc12345")
+    assert 'src="/static/app.js?v=abc12345"' in html and 'href="/pitch"' in html and 'https://cdn.x/a.js"' in html

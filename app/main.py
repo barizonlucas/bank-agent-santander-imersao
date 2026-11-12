@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,7 @@ from app.bank.sessions import Session, SessionStore, hash_session_id
 from app.config import DATA_DIR, PROJECT_NAME
 from app.governance.audit import AuditLog, Exchange
 from app.logging_setup import configure_logging
+from app.pages import compute_static_version, render_page
 
 STATIC_DIR = Path(__file__).parent / "static"
 PITCH_DIR = Path(__file__).resolve().parent.parent / "pitch"
@@ -106,14 +107,22 @@ def about() -> dict[str, Any]:
     return build_about()
 
 
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+def _html_page(request: Request, file_name: str) -> HTMLResponse:
+    html = render_page(STATIC_DIR / file_name, request.app.state.static_version)
+    return HTMLResponse(html, headers=NO_CACHE)
+
+
 @api.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def index(request: Request) -> HTMLResponse:
+    return _html_page(request, "index.html")
 
 
 @api.get("/governance")
-def governance_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "governance.html")
+def governance_page(request: Request) -> HTMLResponse:
+    return _html_page(request, "governance.html")
 
 
 @api.get("/governanca")
@@ -134,6 +143,7 @@ def create_app(
     app.state.sessions = sessions or SessionStore(DATA_DIR)  # account + chat persisted until "reset session"
     app.state.audit = audit or AuditLog(DATA_DIR / "audit.jsonl")  # audit trail (governance)
     app.state.agent = agent or build_default_agent()
+    app.state.static_version = compute_static_version(STATIC_DIR)
     app.include_router(api)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app

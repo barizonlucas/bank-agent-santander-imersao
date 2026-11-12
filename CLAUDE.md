@@ -49,6 +49,7 @@ Everything else must be refused. Money is `Decimal`, never `float`.
 - A transfer needs two steps and the confirmation must come from a LATER user message (`Account` enforces it).
 - Every R$ amount in a model reply must come from a tool/account/user (output guardrail).
 - The balance shown in the UI comes from the backend snapshot, never from model text.
+- Static assets are referenced as `/static/<file>?v=<content hash>` (`app/pages.py`): Cloudflare caches `/static` for 4 h.
 - Secrets live only in `.env` (gitignored). `/api/about` must not leak the key or the system prompt.
 
 ## Tests
