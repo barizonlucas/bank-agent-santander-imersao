@@ -1,136 +1,132 @@
-"""API FastAPI + frontend estático do Agente Bancário Restrito.
+"""FastAPI API + static frontend for the restricted banking agent.
 
-Rodar:  uv run uvicorn app.main:app --reload   ->  http://localhost:8000
+Run:  uv run uvicorn app.main:app --reload   ->  http://localhost:8000
+Dependencies (session store, audit log, agent) are injected into `create_app`,
+so tests can build an app with fakes instead of patching globals.
 """
 
-import logging
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from app.agent.agent import BankAgent
-from app.agent.tools import DECLARACOES
-from app.bank.sessions import SessionStore, hash_sessao
-from app.config import (
-    AUTOR_LINKEDIN, AUTOR_NOME, CURSO_NOME, CURSO_URL, DATA_DIR, GEMINI_MODEL, GEMINI_MODELOS_RESERVA, MAX_ITERACOES_FERRAMENTAS,
-    PROJETO_NOME,
-)
+from app.about import build_about
+from app.agent.agent import AgentReply, BankAgent, build_default_agent
+from app.bank.sessions import Session, SessionStore, hash_session_id
+from app.config import DATA_DIR, PROJECT_NAME
 from app.governance.audit import AuditLog
+from app.logging_setup import configure_logging
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+STATIC_DIR = Path(__file__).parent / "static"
+PITCH_DIR = Path(__file__).resolve().parent.parent / "pitch"
 
-STATIC = Path(__file__).parent / "static"
-PITCH = Path(__file__).resolve().parent.parent / "pitch"
-
-app = FastAPI(title="Agente Bancário Restrito")
-app.state.sessions = SessionStore(DATA_DIR)          # conta + conversa persistidas até "Reiniciar sessão"
-app.state.audit = AuditLog(DATA_DIR / "audit.jsonl")  # trilha de auditoria (governança)
-app.state.agent = BankAgent()
+SESSION_ID_FIELD = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
-class ChatIn(BaseModel):
-    session_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
-    message: str = Field(max_length=2000)  # o guardrail do agente aplica o limite real
+class ChatRequest(BaseModel):
+    session_id: str = SESSION_ID_FIELD
+    message: str = Field(max_length=2000)  # the agent's guardrail enforces the real limit
 
 
-class SessionIn(BaseModel):
-    session_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+class SessionRequest(BaseModel):
+    session_id: str = SESSION_ID_FIELD
 
 
-def _estado(sessao) -> dict:
-    return {**sessao.conta.snapshot(), "mensagens": sessao.transcricao}
+api = APIRouter()
 
 
-@app.post("/api/chat")
-def chat(body: ChatIn) -> dict:
-    sessoes: SessionStore = app.state.sessions
-    sessao = sessoes.obter(body.session_id)
-    inicio = time.perf_counter()
-    resposta = app.state.agent.responder(sessao, body.message)
-    latencia_ms = round((time.perf_counter() - inicio) * 1000)
+def _public_tool_call(call) -> dict[str, Any]:
+    return {"name": call.name, "args": call.args, "result": call.result}
 
-    ferramentas = [{"nome": c.nome, "args": c.args, "resultado": c.resultado} for c in resposta.chamadas]
-    sessao.registrar_troca(body.message, resposta.texto, ferramentas, datetime.now().isoformat(timespec="seconds"))
-    sessoes.salvar(body.session_id)
-    app.state.audit.registrar(
-        sessao_hash=hash_sessao(body.session_id), mensagem=body.message, texto=resposta.texto,
-        ferramentas=ferramentas, tipo=resposta.tipo, guardrail_saida=resposta.guardrail_saida,
-        latencia_ms=latencia_ms, modelo=resposta.modelo or app.state.agent.model, saldo_apos=sessao.conta.snapshot()["saldo"],
+
+def _state_of(session: Session) -> dict[str, Any]:
+    return {**session.account.snapshot(), "messages": session.transcript}
+
+
+def _audit_exchange(state, body: ChatRequest, session: Session, reply: AgentReply, tool_calls, latency_ms: int) -> None:
+    state.audit.record(
+        session_hash=hash_session_id(body.session_id), message=body.message, reply_text=reply.text,
+        tool_calls=tool_calls, kind=reply.kind, output_guardrail_hits=reply.output_guardrail_hits,
+        latency_ms=latency_ms, model=reply.model or state.agent.model,
+        balance_after=session.account.snapshot()["balance"],
     )
-    return {
-        "reply": resposta.texto,
-        "tools": ferramentas,
-        "guardrail_saida": resposta.guardrail_saida,
-        **sessao.conta.snapshot(),  # estado vindo do backend, nunca do texto do LLM
-    }
 
 
-@app.get("/api/state")
-def state(session_id: str) -> dict:
-    return _estado(app.state.sessions.obter(SessionIn(session_id=session_id).session_id))
+@api.post("/api/chat")
+def chat(body: ChatRequest, request: Request) -> dict[str, Any]:
+    state = request.app.state
+    session = state.sessions.get(body.session_id)
+    started = time.perf_counter()
+    reply = state.agent.reply_to(session, body.message)
+    latency_ms = round((time.perf_counter() - started) * 1000)
+    tool_calls = [_public_tool_call(call) for call in reply.tool_calls]
+    session.record_exchange(body.message, reply.text, tool_calls, datetime.now().isoformat(timespec="seconds"))
+    state.sessions.save(body.session_id)
+    _audit_exchange(state, body, session, reply, tool_calls, latency_ms)
+    # The account state comes from the backend, never from the model's text.
+    return {"reply": reply.text, "tools": tool_calls, "output_guardrail": reply.output_guardrail_hits,
+            **session.account.snapshot()}
 
 
-@app.post("/api/reset")
-def reset(body: SessionIn) -> dict:
-    # Apaga conta e conversa da sessão. A trilha de auditoria é mantida (governança).
-    return _estado(app.state.sessions.resetar(body.session_id))
+@api.get("/api/state")
+def get_state(session_id: str, request: Request) -> dict[str, Any]:
+    validated = SessionRequest(session_id=session_id).session_id
+    return _state_of(request.app.state.sessions.get(validated))
 
 
-@app.get("/api/governance")
-def governance() -> dict:
-    return {"modelo": app.state.agent.model, **app.state.audit.metricas()}
+@api.post("/api/reset")
+def reset(body: SessionRequest, request: Request) -> dict[str, Any]:
+    # Deletes account and conversation. The audit trail is kept (governance).
+    return _state_of(request.app.state.sessions.reset(body.session_id))
 
 
-@app.get("/api/about")
-def about() -> dict:
-    """Informações públicas do projeto. Não expõe chave, prompt nem detalhes internos sensíveis."""
-    return {
-        "projeto": {
-            "nome": PROJETO_NOME,
-            "descricao": "Agente de IA que gerencia uma conta bancária fictícia (saldo inicial R$ 1.000,00) "
-            "e executa somente três operações: consultar saldo, depositar e transferir.",
-        },
-        "stack": [
-            {"camada": "Backend", "tecnologia": "Python 3.11+ · FastAPI · Uvicorn"},
-            {"camada": "IA", "tecnologia": "SDK google-genai (Gemini API)"},
-            {"camada": "Frontend", "tecnologia": "HTML · CSS · JavaScript (sem frameworks)"},
-            {"camada": "Regras de negócio", "tecnologia": "Python + Decimal (validação nas ferramentas)"},
-            {"camada": "Testes", "tecnologia": "pytest (unitários, loop com modelo falso, API) + evals com modelo real"},
-            {"camada": "Ambiente", "tecnologia": "uv (dependências) · python-dotenv"},
-        ],
-        "llm": {
-            "provedor": "Google Gemini",
-            "modelo": GEMINI_MODEL,
-            "modelos_reserva": list(GEMINI_MODELOS_RESERVA),
-            "uso": "Function calling manual: o modelo só interpreta a intenção e escolhe a ferramenta; "
-            "cálculo, validação e saldo ficam no código.",
-            "temperatura": 0,
-            "max_ferramentas_por_mensagem": MAX_ITERACOES_FERRAMENTAS,
-            "ferramentas": [d.name for d in DECLARACOES],
-        },
-        "autor": {"nome": AUTOR_NOME, "linkedin": AUTOR_LINKEDIN},
-        "curso": {"nome": CURSO_NOME, "url": CURSO_URL},
-    }
+@api.get("/api/governance")
+def governance_metrics(request: Request) -> dict[str, Any]:
+    return {"model": request.app.state.agent.model, **request.app.state.audit.metrics()}
 
 
-@app.get("/")
+@api.get("/api/about")
+def about() -> dict[str, Any]:
+    return build_about()
+
+
+@api.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC_DIR / "index.html")
 
 
-@app.get("/governanca")
-def governanca_page() -> FileResponse:
-    return FileResponse(STATIC / "governanca.html")
+@api.get("/governance")
+def governance_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "governance.html")
 
 
-@app.get("/pitch")
+@api.get("/governanca")
+def legacy_governance_route() -> RedirectResponse:
+    # Old Portuguese URL kept as a redirect only; it serves no data itself.
+    return RedirectResponse("/governance", status_code=301)
+
+
+@api.get("/pitch")
 def pitch() -> FileResponse:
-    return FileResponse(PITCH / "index.html")
+    return FileResponse(PITCH_DIR / "index.html")
 
 
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+def create_app(
+    sessions: SessionStore | None = None, audit: AuditLog | None = None, agent: BankAgent | None = None
+) -> FastAPI:
+    app = FastAPI(title=PROJECT_NAME)
+    app.state.sessions = sessions or SessionStore(DATA_DIR)  # account + chat persisted until "reset session"
+    app.state.audit = audit or AuditLog(DATA_DIR / "audit.jsonl")  # audit trail (governance)
+    app.state.agent = agent or build_default_agent()
+    app.include_router(api)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    return app
+
+
+configure_logging()
+app = create_app()

@@ -133,3 +133,16 @@ PROJECT_DESCRIPTION = (
     "Agente de IA que gerencia uma conta bancária fictícia (saldo inicial R$ 1.000,00) "
     "e executa somente três operações: consultar saldo, depositar e transferir."
 )
+
+LLM_USAGE = (
+    "Function calling manual: o modelo só interpreta a intenção e escolhe a ferramenta; "
+    "cálculo, validação e saldo ficam no código."
+)
+STACK_ROWS = [
+    {"layer": "Backend", "technology": "Python 3.11+ · FastAPI · Uvicorn"},
+    {"layer": "IA", "technology": "SDK google-genai (Gemini API)"},
+    {"layer": "Frontend", "technology": "HTML · CSS · JavaScript (sem frameworks)"},
+    {"layer": "Regras de negócio", "technology": "Python + Decimal (validação nas ferramentas)"},
+    {"layer": "Testes", "technology": "pytest (unitários, loop com modelo falso, API) + evals com modelo real"},
+    {"layer": "Ambiente", "technology": "uv (dependências) · python-dotenv"},
+]

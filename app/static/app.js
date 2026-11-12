@@ -1,197 +1,230 @@
-// Frontend do Agente Bancário Restrito (JS puro). Todo texto é inserido via
-// textContent para evitar injeção de HTML vindo do modelo ou do usuário.
+// Frontend of the restricted banking agent (plain JS). Every piece of text goes in via
+// textContent so HTML coming from the model or the user can never be injected.
 const $ = (id) => document.getElementById(id);
+const JSON_HEADERS = { "Content-Type": "application/json" };
 
-function getSessionId() {
+// ---- session ---------------------------------------------------------------------
+function loadSessionId() {
   let id = null;
-  try { id = localStorage.getItem("bank_session_id"); } catch {}
-  if (!id) {
-    id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^A-Za-z0-9-]/g, "");
-    try { localStorage.setItem("bank_session_id", id); } catch {}
-  }
+  try { id = localStorage.getItem("bank_session_id"); } catch { /* storage blocked: fall through */ }
+  if (id) return id;
+  id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).replace(/[^A-Za-z0-9-]/g, "");
+  try { localStorage.setItem("bank_session_id", id); } catch { /* storage blocked: session lives in memory */ }
   return id;
 }
-let sessionId = getSessionId();
+const sessionId = loadSessionId();
 
-function addMessage(role, text, tools = []) {
-  const el = document.createElement("div");
-  el.className = `msg ${role}`;
-  renderTexto(el, text);
-  if (tools.length) {
-    const box = document.createElement("div");
-    box.className = "tools";
-    for (const t of tools) {
-      const tag = document.createElement("span");
-      tag.className = `tool ${t.resultado.ok ? "ok" : "err"}`;
-      const args = Object.values(t.args || {}).join(", ");
-      tag.textContent = `${t.nome}(${args}) ${t.resultado.ok ? "✓" : "✗ " + (t.resultado.erro || "")}`;
-      box.appendChild(tag);
-    }
-    el.appendChild(box);
-  }
-  $("messages").appendChild(el);
-  $("messages").scrollTop = $("messages").scrollHeight;
-  return el;
-}
-
-// Markdown mínimo e SEGURO: só **negrito**, montado com nós de texto (sem innerHTML).
-function renderTexto(el, text) {
-  text.split(/(\*\*[^*]+\*\*)/g).forEach((pedaco) => {
-    if (pedaco.startsWith("**") && pedaco.endsWith("**") && pedaco.length > 4) {
-      const b = document.createElement("strong");
-      b.textContent = pedaco.slice(2, -2);
-      el.appendChild(b);
-    } else {
-      el.appendChild(document.createTextNode(pedaco));
-    }
+// ---- messages --------------------------------------------------------------------
+// Minimal and SAFE markdown: only **bold**, built with text nodes (no innerHTML).
+function renderText(container, text) {
+  text.split(/(\*\*[^*]+\*\*)/g).forEach((piece) => {
+    const isBold = piece.startsWith("**") && piece.endsWith("**") && piece.length > 4;
+    if (!isBold) return container.appendChild(document.createTextNode(piece));
+    const strong = document.createElement("strong");
+    strong.textContent = piece.slice(2, -2);
+    container.appendChild(strong);
   });
 }
 
-function renderState(s) {
-  $("saldo").textContent = s.saldo;
-  $("conta").textContent = s.conta;
-  const ul = $("extrato");
-  ul.replaceChildren();
-  if (!s.extrato.length) {
-    const li = document.createElement("li");
-    li.className = "muted";
-    li.textContent = "Nenhuma movimentação.";
-    ul.appendChild(li);
+function toolTag(tool) {
+  const tag = document.createElement("span");
+  tag.className = `tool ${tool.result.ok ? "ok" : "err"}`;
+  const args = Object.values(tool.args || {}).join(", ");
+  tag.textContent = `${tool.name}(${args}) ${tool.result.ok ? "✓" : "✗ " + (tool.result.error || "")}`;
+  return tag;
+}
+
+function addMessage(role, text, tools = []) {
+  const message = document.createElement("div");
+  message.className = `msg ${role}`;
+  renderText(message, text);
+  if (tools.length) {
+    const box = document.createElement("div");
+    box.className = "tools";
+    box.append(...tools.map(toolTag));
+    message.appendChild(box);
   }
-  for (const t of s.extrato) {
-    const li = document.createElement("li");
-    const desc = document.createElement("span");
-    desc.textContent = t.tipo === "DEPOSITO" ? "Depósito" : `Transferência → ${t.destinatario}`;
-    const val = document.createElement("span");
-    val.className = t.tipo === "DEPOSITO" ? "in" : "out";
-    val.textContent = (t.tipo === "DEPOSITO" ? "+ " : "− ") + t.valor;
-    li.title = `${t.data_hora} · saldo após: ${t.saldo_apos}`;
-    li.append(desc, val);
-    ul.appendChild(li);
+  $("messages").appendChild(message);
+  $("messages").scrollTop = $("messages").scrollHeight;
+  return message;
+}
+
+function greet() {
+  addMessage("bot", "Olá! Sou o assistente do Banco Imersão. Posso consultar seu saldo, fazer um depósito ou uma transferência. Como posso ajudar?");
+}
+
+// Restores the conversation saved by the backend (kept until "Reiniciar sessão").
+function renderTranscript(entries) {
+  $("messages").replaceChildren();
+  greet();
+  for (const entry of entries || []) {
+    if (entry.role === "user") addMessage("user", entry.text);
+    else addMessage("bot", entry.text, entry.tools || []);
   }
-  const p = s.pendente;
-  $("pending").classList.toggle("hidden", !p);
-  $("pending-info").textContent = p ? `${p.valor} para ${p.destinatario} (${p.operacao_id})` : "";
+}
+
+// ---- account state ---------------------------------------------------------------
+function statementRow(transaction) {
+  const isDeposit = transaction.type === "DEPOSIT";
+  const row = document.createElement("li");
+  const description = document.createElement("span");
+  description.textContent = isDeposit ? "Depósito" : `Transferência → ${transaction.recipient}`;
+  const amount = document.createElement("span");
+  amount.className = isDeposit ? "in" : "out";
+  amount.textContent = (isDeposit ? "+ " : "− ") + transaction.amount;
+  row.title = `${transaction.timestamp} · saldo após: ${transaction.balance_after}`;
+  row.append(description, amount);
+  return row;
+}
+
+function renderStatement(statement) {
+  const list = $("statement");
+  list.replaceChildren();
+  if (!statement.length) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = "Nenhuma movimentação.";
+    list.appendChild(empty);
+  }
+  list.append(...statement.map(statementRow));
+}
+
+function renderState(state) {
+  $("balance").textContent = state.balance;
+  $("account").textContent = state.account;
+  renderStatement(state.statement);
+  const pending = state.pending;
+  $("pending").classList.toggle("hidden", !pending);
+  $("pending-info").textContent = pending ? `${pending.amount} para ${pending.recipient} (${pending.operation_id})` : "";
+}
+
+// ---- sending ---------------------------------------------------------------------
+function startElapsedTimer(indicator) {
+  const startedAt = Date.now();
+  return setInterval(() => {
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    if (seconds >= 2) indicator.textContent = `Processando… ${seconds} s`;
+  }, 1000);
+}
+
+function showGuardrailNote(message) {
+  const note = document.createElement("div");
+  note.className = "guard-note";
+  note.textContent = "🛡️ Resposta verificada e corrigida pelo guardrail de saída";
+  message.appendChild(note);
+}
+
+async function postChat(text) {
+  const response = await fetch("/api/chat", {
+    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ session_id: sessionId, message: text }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : response.statusText);
+  return data;
 }
 
 let busy = false;
-async function send(text) {
-  text = text.trim();
+async function send(rawText) {
+  const text = rawText.trim();
   if (!text || busy) return;
   busy = true;
   $("send").disabled = true;
   addMessage("user", text);
   const typing = addMessage("bot typing", "Processando…");
-  const t0 = Date.now();
-  const relogio = setInterval(() => {
-    const seg = Math.round((Date.now() - t0) / 1000);
-    if (seg >= 2) typing.textContent = `Processando… ${seg} s`;
-  }, 1000);
+  const timer = startElapsedTimer(typing);
   try {
-    const r = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: sessionId, message: text }),
-    });
-    const data = await r.json();
+    const data = await postChat(text);
     typing.remove();
-    if (!r.ok) throw new Error(data.detail ? JSON.stringify(data.detail) : r.statusText);
-    const el = addMessage("bot", data.reply, data.tools || []);
-    if (data.guardrail_saida && data.guardrail_saida.length) {
-      const aviso = document.createElement("div");
-      aviso.className = "guard-note";
-      aviso.textContent = "🛡️ Resposta verificada e corrigida pelo guardrail de saída";
-      el.appendChild(aviso);
-    }
+    const message = addMessage("bot", data.reply, data.tools || []);
+    if (data.output_guardrail && data.output_guardrail.length) showGuardrailNote(message);
     renderState(data);
-  } catch (e) {
+  } catch (error) {
     typing.remove();
     addMessage("bot", "Erro de comunicação com o servidor. Tente novamente.");
-    console.error(e);
+    console.error(error);
   } finally {
-    clearInterval(relogio);
+    clearInterval(timer);
     busy = false;
     $("send").disabled = false;
     $("input").focus();
   }
 }
 
-$("form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  const v = $("input").value;
-  $("input").value = "";
-  send(v);
-});
-document.querySelectorAll(".chips button").forEach((b) => b.addEventListener("click", () => send(b.textContent)));
-$("confirm").addEventListener("click", () => send("Confirmo a transferência."));
-$("cancel").addEventListener("click", () => send("Cancelar a transferência."));
-$("reset").addEventListener("click", async () => {
-  const r = await fetch("/api/reset", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId }),
+async function resetSession() {
+  const response = await fetch("/api/reset", {
+    method: "POST", headers: JSON_HEADERS, body: JSON.stringify({ session_id: sessionId }),
   });
   $("messages").replaceChildren();
-  renderState(await r.json());
+  renderState(await response.json());
   greet();
-});
+}
 
-// Restaura a conversa salva no backend (persistida até "Reiniciar sessão").
-function renderTranscricao(mensagens) {
-  $("messages").replaceChildren();
-  greet();
-  for (const m of mensagens || []) {
-    if (m.papel === "user") addMessage("user", m.texto);
-    else addMessage("bot", m.texto, m.ferramentas || []);
+// ---- "About the project" dialog (data from /api/about) ---------------------------
+function renderStack(stack) {
+  const list = $("about-stack");
+  list.replaceChildren();
+  for (const item of stack) {
+    const term = document.createElement("dt");
+    term.textContent = item.layer;
+    const detail = document.createElement("dd");
+    detail.textContent = item.technology;
+    list.append(term, detail);
   }
 }
 
-// ---- Painel "Sobre o projeto" (dados vindos de /api/about) ----
-async function carregarSobre() {
-  try {
-    const r = await fetch("/api/about");
-    if (!r.ok) return;
-    const a = await r.json();
-    $("ab-nome").textContent = a.projeto.nome;
-    $("ab-desc").textContent = a.projeto.descricao;
-    const dl = $("ab-stack");
-    dl.replaceChildren();
-    for (const item of a.stack) {
-      const dt = document.createElement("dt");
-      dt.textContent = item.camada;
-      const dd = document.createElement("dd");
-      dd.textContent = item.tecnologia;
-      dl.append(dt, dd);
-    }
-    $("ab-provedor").textContent = a.llm.provedor;
-    $("ab-modelo").textContent = a.llm.modelo;
-    $("ab-uso").textContent = a.llm.uso;
-    $("ab-temp").textContent = `${a.llm.temperatura} (respostas determinísticas) · máx. ${a.llm.max_ferramentas_por_mensagem} ferramentas por mensagem`;
-    $("ab-tools").textContent = a.llm.ferramentas.join(", ");
-    for (const id of ["ab-autor", "foot-autor"]) { $(id).href = a.autor.linkedin; }
-    $("ab-autor").textContent = `${a.autor.nome} — LinkedIn`;
-    $("foot-autor").textContent = a.autor.nome;
-    for (const id of ["ab-curso", "foot-curso"]) { $(id).href = a.curso.url; }
-    $("ab-curso").textContent = a.curso.nome;
-  } catch (e) { console.error(e); }
+function renderAbout(about) {
+  $("about-name").textContent = about.project.name;
+  $("about-description").textContent = about.project.description;
+  renderStack(about.stack);
+  $("about-provider").textContent = about.llm.provider;
+  $("about-model").textContent = about.llm.model;
+  $("about-usage").textContent = about.llm.usage;
+  $("about-temperature").textContent =
+    `${about.llm.temperature} (respostas determinísticas) · máx. ${about.llm.max_tools_per_message} ferramentas por mensagem`;
+  $("about-tools").textContent = about.llm.tools.join(", ");
+  for (const id of ["about-author", "footer-author"]) $(id).href = about.author.linkedin;
+  $("about-author").textContent = `${about.author.name} — LinkedIn`;
+  $("footer-author").textContent = about.author.name;
+  for (const id of ["about-course", "footer-course"]) $(id).href = about.course.url;
+  $("about-course").textContent = about.course.name;
 }
+
+async function loadAbout() {
+  try {
+    const response = await fetch("/api/about");
+    if (response.ok) renderAbout(await response.json());
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// ---- wiring ----------------------------------------------------------------------
+$("form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = $("input").value;
+  $("input").value = "";
+  send(text);
+});
+document.querySelectorAll(".chips button").forEach((chip) => chip.addEventListener("click", () => send(chip.textContent)));
+$("confirm").addEventListener("click", () => send("Confirmo a transferência."));
+$("cancel").addEventListener("click", () => send("Cancelar a transferência."));
+$("reset").addEventListener("click", resetSession);
 $("about-open").addEventListener("click", () => $("about").showModal());
 $("about-close").addEventListener("click", () => $("about").close());
-$("about").addEventListener("click", (e) => { if (e.target === $("about")) $("about").close(); });
-carregarSobre();
+$("about").addEventListener("click", (event) => { if (event.target === $("about")) $("about").close(); });
 
-function greet() {
-  addMessage("bot", "Olá! Sou o assistente do Banco Imersão. Posso consultar seu saldo, fazer um depósito ou uma transferência. Como posso ajudar?");
+async function restoreSavedState() {
+  try {
+    const response = await fetch(`/api/state?session_id=${encodeURIComponent(sessionId)}`);
+    if (!response.ok) throw new Error(response.statusText);
+    const state = await response.json();
+    renderTranscript(state.messages);
+    renderState(state);
+  } catch (error) {
+    greet();
+    console.error(error);
+  }
 }
 
-(async () => {
-  try {
-    const r = await fetch(`/api/state?session_id=${encodeURIComponent(sessionId)}`);
-    if (!r.ok) throw new Error(r.statusText);
-    const estado = await r.json();
-    renderTranscricao(estado.mensagens);
-    renderState(estado);
-  } catch (e) {
-    greet();
-    console.error(e);
-  }
-})();
+loadAbout();
+restoreSavedState();

@@ -89,9 +89,9 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; border
 .row { display: flex; gap: 8px; margin-top: 10px; }
 .row.tight { margin-top: 0; }
 .hidden { display: none; }
-.extrato { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
-.extrato li { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; font-variant-numeric: tabular-nums; }
-.extrato .in { color: var(--ok); } .extrato .out { color: var(--london); }
+.statement { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.statement li { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 14px; font-variant-numeric: tabular-nums; }
+.statement .in { color: var(--ok); } .statement .out { color: var(--london); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chips button { background: var(--white); color: var(--text); border: 1px solid var(--mexico-city); font-size: 13px; font-weight: 400; padding: 4px 10px; text-align: left; }
 .chips button:hover { background: var(--lisbon); border-color: var(--santander-red); }

@@ -1,4 +1,4 @@
-/* Painel de governança — mesma paleta (tokens em styles.css). */
+/* Governance dashboard: same palette (tokens live in styles.css). */
 body { min-height: 100vh; }
 .updated { font-size: 12px; opacity: .9; align-self: center; }
 .gov { max-width: 1240px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
@@ -14,9 +14,9 @@ body { min-height: 100vh; }
 .bars li { display: grid; grid-template-columns: 210px 1fr 48px; align-items: center; gap: 10px; font-size: 14px; }
 .track { height: 10px; background: var(--lisbon); border-radius: 999px; overflow: hidden; }
 .fill { height: 100%; background: var(--santander-red); border-radius: 999px; transition: width .5s ease; }
-.fill.c-RECUSA_ESCOPO, .fill.c-VALIDACAO_BLOQUEADA, .fill.c-ENTRADA_BLOQUEADA { background: var(--madrid); }
-.fill.c-GUARDRAIL_SAIDA, .fill.c-ERRO_TECNICO { background: var(--london); }
-.fill.c-CONSULTA, .fill.c-ESCLARECIMENTO { background: var(--mexico-city); }
+.fill.c-OUT_OF_SCOPE_REFUSAL, .fill.c-VALIDATION_BLOCKED, .fill.c-INPUT_BLOCKED { background: var(--madrid); }
+.fill.c-OUTPUT_GUARDRAIL, .fill.c-TECHNICAL_ERROR { background: var(--london); }
+.fill.c-BALANCE_QUERY, .fill.c-CLARIFICATION { background: var(--mexico-city); }
 .bars .n { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -24,9 +24,9 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--rio); ve
 th { font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); font-weight: 600; }
 td.msg { max-width: 360px; }
 .pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--rio); background: var(--lisbon); white-space: nowrap; }
-.pill.OPERACAO { background: var(--santander-red); color: var(--white); border-color: var(--santander-red); }
-.pill.RECUSA_ESCOPO, .pill.VALIDACAO_BLOQUEADA, .pill.ENTRADA_BLOQUEADA { border-color: var(--madrid); color: var(--london); background: var(--white); }
-.pill.GUARDRAIL_SAIDA, .pill.ERRO_TECNICO { background: var(--rio); color: var(--london); border-color: var(--mexico-city); }
+.pill.OPERATION { background: var(--santander-red); color: var(--white); border-color: var(--santander-red); }
+.pill.OUT_OF_SCOPE_REFUSAL, .pill.VALIDATION_BLOCKED, .pill.INPUT_BLOCKED { border-color: var(--madrid); color: var(--london); background: var(--white); }
+.pill.OUTPUT_GUARDRAIL, .pill.TECHNICAL_ERROR { background: var(--rio); color: var(--london); border-color: var(--mexico-city); }
 .pill.inj { background: var(--white); color: var(--london); border: 1px dashed var(--london); margin-left: 4px; }
 .mono { font: 12px ui-monospace, Menlo, monospace; }
 @media (max-width: 960px) {

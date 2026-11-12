@@ -1,93 +1,107 @@
-"""Declaração das ferramentas (function calling) e despacho para a conta.
+"""Tool declarations (function calling) and dispatch to the account.
 
-As descrições são precisas porque são elas que o modelo lê para decidir o que
-chamar. O parâmetro `valor` é STRING de propósito: o parse exato é feito em
-Python (app.bank.money), nunca pelo modelo e nunca via float do JSON.
+The descriptions are precise because the model reads them to decide what to
+call. The amount parameter is a STRING on purpose: exact parsing happens in
+Python (app.bank.money), never in the model and never through a JSON float.
 """
+
+from collections.abc import Callable
+from typing import Any
 
 from google.genai import types
 
-from app.bank.account import Account, OperacaoBancariaError
-from app.bank.money import ValorInvalidoError
+from app import messages
+from app.bank.account import Account, ToolResult
+from app.bank.errors import BankingError
 
-_VALOR = types.Schema(
+GET_BALANCE = "get_balance"
+DEPOSIT = "deposit"
+TRANSFER = "transfer"
+CONFIRM_OPERATION = "confirm_operation"
+CANCEL_OPERATION = "cancel_operation"
+
+# Tools that can change the balance; shared by the agent, the audit and the evals.
+BALANCE_CHANGING_TOOLS = frozenset({DEPOSIT, CONFIRM_OPERATION})
+
+_AMOUNT = types.Schema(
     type=types.Type.STRING,
-    description='Valor em reais como texto, formato "1234.56" (ponto decimal, sem separador de milhar). '
-    "Deve ser exatamente o valor que o usuário pediu.",
+    description='Amount in reais as text, format "1234.56" (decimal point, no thousands separator). '
+    "Must be exactly the amount the user asked for.",
 )
-_OPERACAO_ID = types.Schema(
+_OPERATION_ID = types.Schema(
     type=types.Type.STRING,
-    description="Identificador retornado por `transferir` (ex.: TRF-1A2B3C).",
+    description="Identifier returned by `transfer` (e.g. TRF-1A2B3C).",
 )
 
-DECLARACOES = [
+
+def _object(properties: dict[str, types.Schema], required: list[str]) -> types.Schema:
+    return types.Schema(type=types.Type.OBJECT, properties=properties, required=required or None)
+
+
+DECLARATIONS = [
     types.FunctionDeclaration(
-        name="consultar_saldo",
-        description="Retorna o saldo atual e exato da conta do usuário. Use sempre que precisar informar o saldo.",
-        parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+        name=GET_BALANCE,
+        description="Returns the current, exact balance of the user's account. Use it whenever you must state the balance.",
+        parameters=_object({}, []),
     ),
     types.FunctionDeclaration(
-        name="depositar",
-        description="Deposita um valor positivo na conta do usuário e retorna o novo saldo. "
-        "Use apenas quando o usuário informar claramente o valor.",
-        parameters=types.Schema(type=types.Type.OBJECT, properties={"valor": _VALOR}, required=["valor"]),
+        name=DEPOSIT,
+        description="Deposits a positive amount into the user's account and returns the new balance. "
+        "Use only when the user clearly states the amount.",
+        parameters=_object({"amount": _AMOUNT}, ["amount"]),
     ),
     types.FunctionDeclaration(
-        name="transferir",
-        description="ETAPA 1 de uma transferência: valida o valor e o saldo e cria uma transferência "
-        "PENDENTE (ainda não debita). Depois mostre o resumo e peça confirmação ao usuário.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "valor": _VALOR,
-                "destinatario": types.Schema(
+        name=TRANSFER,
+        description="STEP 1 of a transfer: validates amount and balance and creates a PENDING transfer "
+        "(no debit yet). Then show the summary and ask the user for confirmation.",
+        parameters=_object(
+            {
+                "amount": _AMOUNT,
+                "recipient": types.Schema(
                     type=types.Type.STRING,
-                    description="Para quem enviar, exatamente como o usuário disse (ex.: 'conta da Ana').",
+                    description="Who to send to, exactly as the user said it (e.g. 'conta da Ana').",
                 ),
             },
-            required=["valor", "destinatario"],
+            ["amount", "recipient"],
         ),
     ),
     types.FunctionDeclaration(
-        name="confirmar_operacao",
-        description="ETAPA 2: efetiva a transferência pendente. Só use depois que o usuário confirmou "
-        "explicitamente em uma nova mensagem.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT, properties={"operacao_id": _OPERACAO_ID}, required=["operacao_id"]
-        ),
+        name=CONFIRM_OPERATION,
+        description="STEP 2: executes the pending transfer. Only use it after the user explicitly "
+        "confirmed in a new message.",
+        parameters=_object({"operation_id": _OPERATION_ID}, ["operation_id"]),
     ),
     types.FunctionDeclaration(
-        name="cancelar_operacao",
-        description="Cancela a transferência pendente quando o usuário desistir.",
-        parameters=types.Schema(
-            type=types.Type.OBJECT, properties={"operacao_id": _OPERACAO_ID}, required=["operacao_id"]
-        ),
+        name=CANCEL_OPERATION,
+        description="Cancels the pending transfer when the user gives up.",
+        parameters=_object({"operation_id": _OPERATION_ID}, ["operation_id"]),
     ),
 ]
 
-FERRAMENTAS = [types.Tool(function_declarations=DECLARACOES)]
+TOOLS = [types.Tool(function_declarations=DECLARATIONS)]
 
-# Ferramentas que alteram estado (útil para logs e para os evals)
-FERRAMENTAS_DE_ESCRITA = {"depositar", "confirmar_operacao"}
+_HANDLERS: dict[str, Callable[[Account, dict[str, Any]], ToolResult]] = {
+    GET_BALANCE: lambda account, args: account.get_balance(),
+    DEPOSIT: lambda account, args: account.deposit(args.get("amount")),
+    TRANSFER: lambda account, args: account.prepare_transfer(args.get("amount"), args.get("recipient")),
+    CONFIRM_OPERATION: lambda account, args: account.confirm_transfer(args.get("operation_id")),
+    CANCEL_OPERATION: lambda account, args: account.cancel_transfer(args.get("operation_id")),
+}
 
 
-def executar_ferramenta(conta: Account, nome: str, args: dict | None) -> dict:
-    """Despacha a chamada do modelo para a conta. NUNCA levanta exceção para o modelo:
-    qualquer problema vira um resultado {"ok": False, ...} que ele deve explicar."""
-    args = dict(args or {})
+def _failure(code: str, message: str) -> ToolResult:
+    return {"ok": False, "error": code, "message": message}
+
+
+def execute_tool(account: Account, name: str, args: dict[str, Any] | None) -> ToolResult:
+    """Dispatch a model tool call to the account. NEVER raises toward the model:
+    every problem becomes an `{"ok": False, ...}` result the model must explain."""
+    handler = _HANDLERS.get(name)
+    if handler is None:
+        return _failure("TOOL_NOT_FOUND", messages.TOOL_UNAVAILABLE)
     try:
-        if nome == "consultar_saldo":
-            return conta.consultar_saldo()
-        if nome == "depositar":
-            return conta.depositar(args.get("valor"))
-        if nome == "transferir":
-            return conta.preparar_transferencia(args.get("valor"), args.get("destinatario"))
-        if nome == "confirmar_operacao":
-            return conta.confirmar_transferencia(args.get("operacao_id"))
-        if nome == "cancelar_operacao":
-            return conta.cancelar_transferencia(args.get("operacao_id"))
-        return {"ok": False, "erro": "FERRAMENTA_INEXISTENTE", "mensagem": "Operação não disponível."}
-    except (ValorInvalidoError, OperacaoBancariaError) as exc:
-        return {"ok": False, "erro": exc.codigo, "mensagem": str(exc)}
-    except Exception:  # noqa: BLE001 — falha inesperada não pode vazar para o modelo
-        return {"ok": False, "erro": "ERRO_INTERNO", "mensagem": "Não foi possível concluir a operação."}
+        return handler(account, dict(args or {}))
+    except BankingError as exc:
+        return _failure(exc.code, str(exc))
+    except Exception:  # noqa: BLE001 - an unexpected failure must not leak to the model
+        return _failure("INTERNAL_ERROR", messages.OPERATION_FAILED)

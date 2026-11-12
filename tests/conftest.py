@@ -1,13 +1,19 @@
 import pytest
+from fastapi.testclient import TestClient
 
+from app.agent.agent import BankAgent
 from app.bank.sessions import SessionStore
 from app.governance.audit import AuditLog
-from app.main import app
+from app.main import create_app
 
 
-@pytest.fixture(autouse=True)
-def isolar_dados(tmp_path):
-    """Nenhum teste escreve em data/: sessões e auditoria vão para um diretório temporário."""
-    app.state.sessions = SessionStore(tmp_path)
-    app.state.audit = AuditLog(tmp_path / "audit.jsonl")
-    yield
+@pytest.fixture
+def make_client(tmp_path):
+    """Build an API client with an injected agent. Nothing writes to data/: sessions and
+    the audit trail go to a temporary directory."""
+
+    def build(agent: BankAgent | None = None) -> TestClient:
+        app = create_app(SessionStore(tmp_path), AuditLog(tmp_path / "audit.jsonl"), agent)
+        return TestClient(app)
+
+    return build
