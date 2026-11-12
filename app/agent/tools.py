@@ -28,6 +28,8 @@ _AMOUNT = types.Schema(
     description='Amount in reais as text, format "1234.56" (decimal point, no thousands separator). '
     "Must be exactly the amount the user asked for.",
 )
+# Provenance: an example value in the `recipient` description ("conta da Ana") made the model reuse it when
+# the user gave no recipient ("Transfere 50"). Keep the description free of concrete example names.
 _OPERATION_ID = types.Schema(
     type=types.Type.STRING,
     description="Identifier returned by `transfer` (e.g. TRF-1A2B3C).",
@@ -59,7 +61,8 @@ DECLARATIONS = [
                 "amount": _AMOUNT,
                 "recipient": types.Schema(
                     type=types.Type.STRING,
-                    description="Who to send to, exactly as the user said it (e.g. 'conta da Ana').",
+                    description="Who to send to, copied exactly from the user's message. NEVER invent or assume it: "
+                    "if the user did not name a recipient, do not call this tool, ask who it is for instead.",
                 ),
             },
             ["amount", "recipient"],
