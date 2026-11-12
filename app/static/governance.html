@@ -6,37 +6,37 @@
   <meta name="color-scheme" content="light" />
   <title>Governança da IA — Banco Imersão</title>
   <link rel="stylesheet" href="/static/styles.css" />
-  <link rel="stylesheet" href="/static/governanca.css" />
+  <link rel="stylesheet" href="/static/governance.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="logo" aria-hidden="true">BI</span> Governança da IA <small>Trilha de auditoria e métricas do agente</small> <span class="badge">Projeto acadêmico · conta fictícia</span></div>
     <div class="row tight">
-      <span id="atualizado" class="updated"></span>
+      <span id="updated-at" class="updated"></span>
       <a class="btn ghost" href="/">Voltar ao agente</a>
     </div>
   </header>
 
   <main class="gov">
     <section class="kpis">
-      <div class="kpi"><div class="label">Mensagens auditadas</div><div class="kpi-v" id="k-total">0</div><div class="kpi-s" id="k-sessoes"></div></div>
+      <div class="kpi"><div class="label">Mensagens auditadas</div><div class="kpi-v" id="k-total">0</div><div class="kpi-s" id="k-sessions"></div></div>
       <div class="kpi"><div class="label">Operações concluídas</div><div class="kpi-v" id="k-ops">0</div><div class="kpi-s" id="k-ops-s"></div></div>
-      <div class="kpi"><div class="label">Volume movimentado</div><div class="kpi-v sm" id="k-vol-dep">R$ 0,00</div><div class="kpi-s" id="k-vol-trf"></div></div>
-      <div class="kpi"><div class="label">Recusas fora do escopo</div><div class="kpi-v" id="k-recusas">0</div><div class="kpi-s" id="k-recusas-s"></div></div>
-      <div class="kpi alert"><div class="label">Tentativas de prompt injection</div><div class="kpi-v" id="k-inj">0</div><div class="kpi-s" id="k-inj-s"></div></div>
-      <div class="kpi"><div class="label">Guardrail de saída acionado</div><div class="kpi-v" id="k-guard">0</div><div class="kpi-s">valores da IA corrigidos pelo código</div></div>
-      <div class="kpi"><div class="label">Latência média</div><div class="kpi-v sm" id="k-lat">0 ms</div><div class="kpi-s" id="k-lat-s"></div></div>
-      <div class="kpi"><div class="label">Erros técnicos</div><div class="kpi-v sm" id="k-err">0%</div><div class="kpi-s">falhas da API do modelo</div></div>
+      <div class="kpi"><div class="label">Volume movimentado</div><div class="kpi-v sm" id="k-deposit-volume">R$ 0,00</div><div class="kpi-s" id="k-transfer-volume"></div></div>
+      <div class="kpi"><div class="label">Recusas fora do escopo</div><div class="kpi-v" id="k-refusals">0</div><div class="kpi-s" id="k-refusals-sub"></div></div>
+      <div class="kpi alert"><div class="label">Tentativas de prompt injection</div><div class="kpi-v" id="k-injections">0</div><div class="kpi-s" id="k-injections-sub"></div></div>
+      <div class="kpi"><div class="label">Guardrail de saída acionado</div><div class="kpi-v" id="k-guardrail">0</div><div class="kpi-s">valores da IA corrigidos pelo código</div></div>
+      <div class="kpi"><div class="label">Latência média</div><div class="kpi-v sm" id="k-latency">0 ms</div><div class="kpi-s" id="k-latency-sub"></div></div>
+      <div class="kpi"><div class="label">Erros técnicos</div><div class="kpi-v sm" id="k-errors">0%</div><div class="kpi-s">falhas da API do modelo</div></div>
     </section>
 
     <section class="grid2">
       <div class="card">
         <div class="label">Como o agente respondeu</div>
-        <ul id="categorias" class="bars"></ul>
+        <ul id="categories" class="bars"></ul>
       </div>
       <div class="card">
         <div class="label">Bloqueios pela validação (código)</div>
-        <ul id="validacoes" class="bars"></ul>
+        <ul id="validations" class="bars"></ul>
         <p class="muted tiny">Regras aplicadas nas ferramentas, independentemente do que a IA decidir.</p>
       </div>
     </section>
@@ -46,12 +46,12 @@
       <div class="table-wrap">
         <table>
           <thead><tr><th>Horário</th><th>Sessão</th><th>Mensagem do usuário</th><th>Categoria</th><th>Ferramentas</th><th>Saldo após</th><th>Latência</th></tr></thead>
-          <tbody id="eventos"><tr><td colspan="7" class="muted">Nenhum evento ainda. Converse com o agente para gerar a trilha de auditoria.</td></tr></tbody>
+          <tbody id="events"><tr><td colspan="7" class="muted">Nenhum evento ainda. Converse com o agente para gerar a trilha de auditoria.</td></tr></tbody>
         </table>
       </div>
       <p class="muted tiny">Sessões identificadas por hash (não reversível). Registro completo em <code>data/audit.jsonl</code>. Atualiza a cada 5 s.</p>
     </section>
   </main>
-  <script src="/static/governanca.js"></script>
+  <script src="/static/governance.js"></script>
 </body>
 </html>

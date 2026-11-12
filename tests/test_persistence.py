@@ -2,52 +2,52 @@ import json
 from decimal import Decimal
 
 from app.bank.account import Account
-from app.bank.sessions import SessionStore, hash_sessao
+from app.bank.sessions import SessionStore, hash_session_id
 
-SID = "sessao-persistencia-1"
-
-
-def test_account_ida_e_volta():
-    c = Account()
-    c.depositar("250")
-    c.novo_turno_usuario()
-    c.preparar_transferencia("100", "Ana")
-    c2 = Account.from_dict(json.loads(json.dumps(c.to_dict())))
-    assert c2.saldo == Decimal("1250.00") and len(c2.extrato) == 1
-    assert c2.pendente.valor == Decimal("100.00")
-    c2.novo_turno_usuario()
-    c2.confirmar_transferencia(c2.pendente.operacao_id)
-    assert c2.saldo == Decimal("1150.00")
+SESSION_ID = "session-persistence-1"
 
 
-def test_sessao_sobrevive_a_reinicio_do_servidor(tmp_path):
+def test_account_round_trip():
+    account = Account()
+    account.deposit("250")
+    account.start_user_turn()
+    account.prepare_transfer("100", "Ana")
+    restored = Account.from_dict(json.loads(json.dumps(account.to_dict())))
+    assert restored.balance == Decimal("1250.00") and len(restored.statement) == 1
+    assert restored.pending.amount == Decimal("100.00")
+    restored.start_user_turn()
+    restored.confirm_transfer(restored.pending.operation_id)
+    assert restored.balance == Decimal("1150.00")
+
+
+def test_session_survives_a_server_restart(tmp_path):
     store = SessionStore(tmp_path)
-    s = store.obter(SID)
-    s.conta.depositar("250")
-    s.registrar_troca("Depositar 250", "Feito! Novo saldo: R$ 1.250,00", [], "2026-11-12T10:00:00")
-    store.salvar(SID)
+    session = store.get(SESSION_ID)
+    session.account.deposit("250")
+    session.record_exchange("Depositar 250", "Feito! Novo saldo: R$ 1.250,00", [], "2026-11-12T10:00:00")
+    store.save(SESSION_ID)
 
-    novo = SessionStore(tmp_path).obter(SID)  # "reinício": novo store lendo do disco
-    assert novo.conta.saldo == Decimal("1250.00")
-    assert [m["papel"] for m in novo.transcricao] == ["user", "bot"]
-    assert [c.role for c in novo.historico] == ["user", "model"]  # contexto do LLM reconstruído
+    reloaded = SessionStore(tmp_path).get(SESSION_ID)  # "restart": a new store reading from disk
+    assert reloaded.account.balance == Decimal("1250.00")
+    assert [m["role"] for m in reloaded.transcript] == ["user", "bot"]
+    assert [c.role for c in reloaded.history] == ["user", "model"]  # LLM context rebuilt
 
 
-def test_arquivo_adulterado_e_rejeitado(tmp_path):
+def test_tampered_file_is_rejected(tmp_path):
     store = SessionStore(tmp_path)
-    store.obter(SID).conta.depositar("10")
-    store.salvar(SID)
-    arq = tmp_path / "sessions" / f"{hash_sessao(SID)}.json"
-    dados = json.loads(arq.read_text())
-    dados["conta"]["saldo"] = "999999.00"  # saldo que não bate com o extrato
-    arq.write_text(json.dumps(dados))
-    assert SessionStore(tmp_path).obter(SID).conta.saldo == Decimal("1000.00")  # sessão nova, segura
+    store.get(SESSION_ID).account.deposit("10")
+    store.save(SESSION_ID)
+    file = tmp_path / "sessions" / f"{hash_session_id(SESSION_ID)}.json"
+    data = json.loads(file.read_text())
+    data["account"]["balance"] = "999999.00"  # balance that does not match the statement
+    file.write_text(json.dumps(data))
+    assert SessionStore(tmp_path).get(SESSION_ID).account.balance == Decimal("1000.00")  # fresh, safe session
 
 
-def test_reset_apaga_arquivo(tmp_path):
+def test_reset_deletes_the_file(tmp_path):
     store = SessionStore(tmp_path)
-    store.obter(SID).conta.depositar("10")
-    store.salvar(SID)
-    store.resetar(SID)
-    assert not (tmp_path / "sessions" / f"{hash_sessao(SID)}.json").exists()
-    assert SessionStore(tmp_path).obter(SID).conta.saldo == Decimal("1000.00")
+    store.get(SESSION_ID).account.deposit("10")
+    store.save(SESSION_ID)
+    store.reset(SESSION_ID)
+    assert not (tmp_path / "sessions" / f"{hash_session_id(SESSION_ID)}.json").exists()
+    assert SessionStore(tmp_path).get(SESSION_ID).account.balance == Decimal("1000.00")

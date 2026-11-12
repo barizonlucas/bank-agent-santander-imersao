@@ -12,7 +12,7 @@
   <header class="topbar">
     <div class="brand"><span class="logo" aria-hidden="true">BI</span> Banco Imersão <small>Agente Bancário Restrito</small> <span class="badge">Projeto acadêmico · conta fictícia</span></div>
     <div class="row tight">
-      <a class="btn ghost" href="/governanca" target="_blank" rel="noopener">Governança</a>
+      <a class="btn ghost" href="/governance" target="_blank" rel="noopener">Governança</a>
       <button id="about-open" class="ghost">Sobre o projeto</button>
       <button id="reset" class="ghost" title="Volta o saldo para R$ 1.000,00 e limpa a conversa">Reiniciar sessão</button>
     </div>
@@ -31,8 +31,8 @@
     <aside class="side">
       <div class="card balance">
         <div class="label">Saldo disponível</div>
-        <div id="saldo" class="amount">—</div>
-        <div id="conta" class="muted"></div>
+        <div id="balance" class="amount">—</div>
+        <div id="account" class="muted"></div>
         <div class="muted tiny">Exibido direto do backend (não do texto da IA).</div>
       </div>
 
@@ -47,7 +47,7 @@
 
       <div class="card">
         <div class="label">Extrato da sessão</div>
-        <ul id="extrato" class="extrato"><li class="muted">Nenhuma movimentação.</li></ul>
+        <ul id="statement" class="statement"><li class="muted">Nenhuma movimentação.</li></ul>
       </div>
 
       <div class="card">
@@ -74,8 +74,8 @@
     </aside>
   </main>
   <footer class="footer">
-    Projeto final · <a id="foot-curso" target="_blank" rel="noopener noreferrer">Santander Imersão Digital 2026</a>
-    · por <a id="foot-autor" target="_blank" rel="noopener noreferrer">Lucas Borges Corrêa</a>
+    Projeto final · <a id="footer-course" target="_blank" rel="noopener noreferrer">Santander Imersão Digital 2026</a>
+    · por <a id="footer-author" target="_blank" rel="noopener noreferrer">Lucas Borges Corrêa</a>
   </footer>
 
   <dialog id="about" aria-labelledby="about-title">
@@ -90,35 +90,35 @@
       </div>
       <div class="row tight">
         <a class="btn primary" href="/pitch" target="_blank" rel="noopener">Abrir pitch ↗</a>
-        <a class="btn outline" href="/governanca" target="_blank" rel="noopener">Governança ↗</a>
+        <a class="btn outline" href="/governance" target="_blank" rel="noopener">Governança ↗</a>
       </div>
     </div>
     <section>
-      <h3 id="ab-nome">Agente Bancário Restrito</h3>
-      <p id="ab-desc" class="muted"></p>
+      <h3 id="about-name">Agente Bancário Restrito</h3>
+      <p id="about-description" class="muted"></p>
     </section>
     <section>
       <h3>Stack</h3>
-      <dl id="ab-stack" class="kv"></dl>
+      <dl id="about-stack" class="kv"></dl>
     </section>
     <section>
       <h3>Inteligência Artificial</h3>
       <dl class="kv">
-        <dt>Provedor</dt><dd id="ab-provedor"></dd>
-        <dt>Modelo</dt><dd><code id="ab-modelo"></code></dd>
-        <dt>Como é usado</dt><dd id="ab-uso"></dd>
-        <dt>Temperatura</dt><dd id="ab-temp"></dd>
-        <dt>Ferramentas</dt><dd id="ab-tools"></dd>
+        <dt>Provedor</dt><dd id="about-provider"></dd>
+        <dt>Modelo</dt><dd><code id="about-model"></code></dd>
+        <dt>Como é usado</dt><dd id="about-usage"></dd>
+        <dt>Temperatura</dt><dd id="about-temperature"></dd>
+        <dt>Ferramentas</dt><dd id="about-tools"></dd>
       </dl>
     </section>
     <section class="links">
       <div>
         <h3>Autor</h3>
-        <a id="ab-autor" target="_blank" rel="noopener noreferrer"></a>
+        <a id="about-author" target="_blank" rel="noopener noreferrer"></a>
       </div>
       <div>
         <h3>Curso</h3>
-        <a id="ab-curso" target="_blank" rel="noopener noreferrer"></a>
+        <a id="about-course" target="_blank" rel="noopener noreferrer"></a>
       </div>
     </section>
   </dialog>

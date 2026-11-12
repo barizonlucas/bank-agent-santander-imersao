@@ -1,12 +1,12 @@
-"""Trilha de auditoria e métricas de governança da IA.
+"""Audit trail and AI-governance metrics.
 
-Cada mensagem do usuário gera UM evento com: o que foi pedido, como o agente
-respondeu (categoria), quais ferramentas rodaram, se houve suspeita de prompt
-injection, se o guardrail de saída agiu, latência e saldo resultante.
+Each user message produces ONE event with: what was asked, how the agent replied
+(category), which tools ran, whether prompt injection was suspected, whether the
+output guardrail acted, latency and the resulting balance.
 
-A classificação é DETERMINÍSTICA (regras em código, não opinião do LLM), para
-que as métricas sejam auditáveis. Os eventos ficam em memória (para o painel) e
-em ``data/audit.jsonl`` (registro permanente, uma linha JSON por evento).
+Classification is DETERMINISTIC (rules in code, not the LLM's opinion), so the
+metrics are auditable. Events are kept in memory (for the dashboard) and in
+``data/audit.jsonl`` (permanent record, one JSON line per event).
 """
 
 from __future__ import annotations
@@ -15,27 +15,30 @@ import json
 import re
 import threading
 from collections import Counter, deque
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
-from app.agent.output_guard import extrair_valores
-from app.agent.prompt import MENSAGEM_RECUSA
+from app import messages
+from app.agent import agent as agent_module
+from app.agent import tools
+from app.agent.output_guard import extract_amounts
 from app.bank.money import format_brl
 
-CATEGORIAS = {
-    "OPERACAO": "Operação executada",
-    "CONSULTA": "Consulta de saldo",
-    "RECUSA_ESCOPO": "Recusa (fora do escopo)",
-    "ESCLARECIMENTO": "Pedido de esclarecimento",
-    "VALIDACAO_BLOQUEADA": "Bloqueada pela validação",
-    "ENTRADA_BLOQUEADA": "Bloqueada na entrada",
-    "GUARDRAIL_SAIDA": "Corrigida pelo guardrail de saída",
-    "ERRO_TECNICO": "Erro técnico",
+CATEGORIES = tuple(messages.CATEGORY_LABELS)
+_OPERATION_TOOLS = tools.BALANCE_CHANGING_TOOLS | {tools.TRANSFER, tools.CANCEL_OPERATION}
+
+# Volume tracking: tool name -> (volume bucket, result field holding the amount).
+_VOLUME_FIELDS = {
+    tools.DEPOSIT: ("deposits", "deposited_amount"),
+    tools.CONFIRM_OPERATION: ("transfers", "transferred_amount"),
 }
 
-# Heurística de MEDIÇÃO (não bloqueia nada: quem protege são o prompt e as ferramentas).
-_PADROES_INJECAO = [
+# MEASUREMENT heuristic (it blocks nothing: the prompt and the tools protect).
+# The patterns match Portuguese user input.
+_INJECTION_PATTERNS = [
     r"ignor\w*\s+(?:\w+\s+){0,3}(instru|regra|orienta)",
     r"esque[cç]a\s+(?:\w+\s+){0,3}(instru|regra)",
     r"modo\s+(administrador|admin|desenvolvedor|dev|deus|god|debug|irrestrito)",
@@ -46,143 +49,224 @@ _PADROES_INJECAO = [
     r"^\s*(sistema|system)\s*:",
     r"(altere|mude|defina|zere)\s+(o\s+)?saldo",
 ]
-_RE_INJECAO = re.compile("|".join(_PADROES_INJECAO), re.IGNORECASE | re.MULTILINE)
-_FERRAMENTAS_ESCRITA = {"depositar", "confirmar_operacao"}
+_INJECTION_REGEX = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE | re.MULTILINE)
 
 
-def suspeita_injecao(mensagem: str) -> bool:
-    return bool(_RE_INJECAO.search(mensagem or ""))
+def is_injection_suspected(message: str) -> bool:
+    return bool(_INJECTION_REGEX.search(message or ""))
 
 
-def classificar(texto: str, ferramentas: list[dict], tipo: str | None, guardrail_saida: list[str]) -> str:
-    if tipo == "ENTRADA_INVALIDA":
-        return "ENTRADA_BLOQUEADA"
-    if tipo in ("ERRO_API", "LIMITE_ITERACOES"):
-        return "ERRO_TECNICO"
-    if guardrail_saida:
-        return "GUARDRAIL_SAIDA"
-    ok = [f for f in ferramentas if f["ok"]]
-    if any(f["nome"] in _FERRAMENTAS_ESCRITA | {"transferir", "cancelar_operacao"} for f in ok):
-        return "OPERACAO"
-    if any(not f["ok"] for f in ferramentas):
-        return "VALIDACAO_BLOQUEADA"
-    if ok:
-        return "CONSULTA"
-    if texto.strip().startswith(MENSAGEM_RECUSA.split(":")[0]):
-        return "RECUSA_ESCOPO"
-    return "ESCLARECIMENTO"
+def classify(
+    reply_text: str, tool_summaries: list[dict[str, Any]], kind: str | None, output_guardrail_hits: list[str]
+) -> str:
+    """Map one exchange to exactly one category (first matching rule wins)."""
+    if kind == agent_module.INVALID_INPUT:
+        return "INPUT_BLOCKED"
+    if kind in (agent_module.API_ERROR, agent_module.ITERATION_LIMIT):
+        return "TECHNICAL_ERROR"
+    if output_guardrail_hits:
+        return "OUTPUT_GUARDRAIL"
+    return _classify_by_tools(reply_text, tool_summaries)
 
 
-def _volume(ferramentas: list[dict]) -> dict[str, Decimal]:
-    vol = {"depositos": Decimal("0"), "transferencias": Decimal("0")}
-    for f in ferramentas:
-        if not f["ok"]:
-            continue
-        chave, campo = {"depositar": ("depositos", "valor_depositado"),
-                        "confirmar_operacao": ("transferencias", "valor_transferido")}.get(f["nome"], (None, None))
-        if chave:
-            valores = [v for _, v in extrair_valores(f["resultado"].get(campo, "")) if v is not None]
-            vol[chave] += sum(valores, Decimal("0"))
-    return vol
+def _classify_by_tools(reply_text: str, tool_summaries: list[dict[str, Any]]) -> str:
+    succeeded = [t for t in tool_summaries if t["ok"]]
+    if any(t["name"] in _OPERATION_TOOLS for t in succeeded):
+        return "OPERATION"
+    if any(not t["ok"] for t in tool_summaries):
+        return "VALIDATION_BLOCKED"
+    if succeeded:
+        return "BALANCE_QUERY"
+    if reply_text.strip().startswith(messages.SCOPE_REFUSAL.split(":")[0]):
+        return "OUT_OF_SCOPE_REFUSAL"
+    return "CLARIFICATION"
+
+
+def _volumes(tool_summaries: list[dict[str, Any]]) -> dict[str, Decimal]:
+    volumes = {"deposits": Decimal("0"), "transfers": Decimal("0")}
+    for tool in tool_summaries:
+        bucket, field_name = _VOLUME_FIELDS.get(tool["name"], (None, None))
+        if tool["ok"] and bucket:
+            amounts = [a for _, a in extract_amounts(tool["result"].get(field_name, "")) if a is not None]
+            volumes[bucket] += sum(amounts, Decimal("0"))
+    return volumes
+
+
+def _summarize_tools(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": call["name"],
+            "args": call["args"],
+            "ok": bool(call["result"].get("ok")),
+            "error": call["result"].get("error"),
+            "result": call["result"],
+        }
+        for call in tool_calls
+    ]
+
+
+@dataclass(frozen=True)
+class Exchange:
+    """Everything the audit needs to know about one user message and the agent's answer."""
+
+    session_hash: str
+    message: str
+    reply_text: str
+    tool_calls: list[dict[str, Any]]
+    kind: str | None
+    output_guardrail_hits: list[str]
+    latency_ms: int
+    model: str
+    balance_after: str
+
+
+def _describe_exchange(exchange: Exchange, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """The part of an audit event that is derived from the exchange itself."""
+    volumes = _volumes(summaries)
+    category = classify(exchange.reply_text or "", summaries, exchange.kind, exchange.output_guardrail_hits)
+    return {
+        "message": (exchange.message or "")[:200],
+        "reply": (exchange.reply_text or "")[:300],
+        "category": category,
+        "tools": [{k: v for k, v in t.items() if k != "result"} for t in summaries],
+        "injection_suspected": is_injection_suspected(exchange.message),
+        "changed_balance": any(t["ok"] and t["name"] in tools.BALANCE_CHANGING_TOOLS for t in summaries),
+        "output_guardrail": exchange.output_guardrail_hits,
+        "deposit_volume": str(volumes["deposits"]),
+        "transfer_volume": str(volumes["transfers"]),
+    }
 
 
 class AuditLog:
-    def __init__(self, arquivo: Path | None = None, capacidade: int = 1000) -> None:
-        self._eventos: deque[dict] = deque(maxlen=capacidade)
+    def __init__(self, file: Path | None = None, capacity: int = 1000) -> None:
+        self._events: deque[dict[str, Any]] = deque(maxlen=capacity)
         self._lock = threading.Lock()
-        self._arquivo = Path(arquivo) if arquivo else None
-        if self._arquivo:
-            self._arquivo.parent.mkdir(parents=True, exist_ok=True)
-            self._recarregar()
+        self._file = Path(file) if file else None
+        if self._file:
+            self._file.parent.mkdir(parents=True, exist_ok=True)
+            self._reload()
 
-    def _recarregar(self) -> None:
-        if not self._arquivo.exists():
+    def _reload(self) -> None:
+        if not self._file.exists():
             return
-        for linha in self._arquivo.read_text(encoding="utf-8").splitlines()[-self._eventos.maxlen:]:
-            try:
-                self._eventos.append(json.loads(linha))
-            except json.JSONDecodeError:
-                continue
+        for line in self._file.read_text(encoding="utf-8").splitlines()[-self._events.maxlen :]:
+            event = _parse_event(line)
+            if event is not None:
+                self._events.append(event)
 
-    def registrar(self, *, sessao_hash: str, mensagem: str, texto: str, ferramentas: list[dict],
-                  tipo: str | None, guardrail_saida: list[str], latencia_ms: int, modelo: str,
-                  saldo_apos: str) -> dict:
-        resumo_ferramentas = [
-            {"nome": f["nome"], "args": f["args"], "ok": bool(f["resultado"].get("ok")),
-             "erro": f["resultado"].get("erro"), "resultado": f["resultado"]}
-            for f in ferramentas
-        ]
-        vol = _volume(resumo_ferramentas)
-        evento = {
+    def record(self, exchange: Exchange) -> dict[str, Any]:
+        summaries = _summarize_tools(exchange.tool_calls)
+        event = {
             "ts": datetime.now().isoformat(timespec="seconds"),
-            "sessao": sessao_hash,
-            "mensagem": (mensagem or "")[:200],
-            "resposta": (texto or "")[:300],
-            "categoria": classificar(texto or "", resumo_ferramentas, tipo, guardrail_saida),
-            "ferramentas": [{k: v for k, v in f.items() if k != "resultado"} for f in resumo_ferramentas],
-            "suspeita_injecao": suspeita_injecao(mensagem),
-            "alterou_saldo": any(f["ok"] and f["nome"] in _FERRAMENTAS_ESCRITA for f in resumo_ferramentas),
-            "guardrail_saida": guardrail_saida,
-            "volume_depositos": str(vol["depositos"]),
-            "volume_transferencias": str(vol["transferencias"]),
-            "latencia_ms": latencia_ms,
-            "modelo": modelo,
-            "saldo_apos": saldo_apos,
+            "session": exchange.session_hash,
+            **_describe_exchange(exchange, summaries),
+            "latency_ms": exchange.latency_ms,
+            "model": exchange.model,
+            "balance_after": exchange.balance_after,
         }
+        self._append(event)
+        return event
+
+    def _append(self, event: dict[str, Any]) -> None:
         with self._lock:
-            self._eventos.append(evento)
-            if self._arquivo:
-                with self._arquivo.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(evento, ensure_ascii=False) + "\n")
-        return evento
+            self._events.append(event)
+            if self._file:
+                with self._file.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-    def metricas(self, ultimos: int = 20) -> dict:
+    def metrics(self, recent: int = 20) -> dict[str, Any]:
         with self._lock:
-            eventos = list(self._eventos)
-        total = len(eventos)
-        cat = Counter(e["categoria"] for e in eventos)
-        injecoes = [e for e in eventos if e["suspeita_injecao"]]
-        erros_validacao = Counter(
-            f["erro"] for e in eventos for f in e["ferramentas"] if not f["ok"] and f.get("erro")
-        )
-        latencias = sorted(e["latencia_ms"] for e in eventos if e["categoria"] != "ENTRADA_BLOQUEADA")
-        dep = sum((Decimal(e["volume_depositos"]) for e in eventos), Decimal("0"))
-        trf = sum((Decimal(e["volume_transferencias"]) for e in eventos), Decimal("0"))
-        conversas_fora_escopo = cat["RECUSA_ESCOPO"]
-
-        def pct(n: int) -> float:
-            return round(100 * n / total, 1) if total else 0.0
-
+            events = list(self._events)
+        counts = Counter(e["category"] for e in events)
         return {
-            "total_mensagens": total,
-            "sessoes": len({e["sessao"] for e in eventos}),
-            "por_categoria": [
-                {"categoria": c, "rotulo": CATEGORIAS[c], "total": cat[c], "pct": pct(cat[c])} for c in CATEGORIAS
-            ],
-            "operacoes": {
-                "depositos": sum(1 for e in eventos for f in e["ferramentas"] if f["ok"] and f["nome"] == "depositar"),
-                "transferencias": sum(
-                    1 for e in eventos for f in e["ferramentas"] if f["ok"] and f["nome"] == "confirmar_operacao"
-                ),
-                "volume_depositos": format_brl(dep),
-                "volume_transferencias": format_brl(trf),
-            },
-            "seguranca": {
-                "recusas_fora_escopo": conversas_fora_escopo,
-                "tentativas_injecao": len(injecoes),
-                "injecoes_que_alteraram_saldo": sum(1 for e in injecoes if e["alterou_saldo"]),
-                "validacoes_bloqueadas": dict(erros_validacao),
-                "guardrail_saida_acionado": cat["GUARDRAIL_SAIDA"],
-                "entradas_bloqueadas": cat["ENTRADA_BLOQUEADA"],
-            },
-            "desempenho": {
-                "latencia_media_ms": round(sum(latencias) / len(latencias)) if latencias else 0,
-                "latencia_p95_ms": latencias[min(len(latencias) - 1, int(len(latencias) * 0.95))] if latencias else 0,
-                "taxa_erro_tecnico_pct": pct(cat["ERRO_TECNICO"]),
-            },
-            "eventos_recentes": [
-                {k: e[k] for k in ("ts", "sessao", "mensagem", "categoria", "ferramentas", "suspeita_injecao",
-                                   "guardrail_saida", "latencia_ms", "saldo_apos")}
-                for e in reversed(eventos[-ultimos:])
-            ],
+            "total_messages": len(events),
+            "sessions": len({e["session"] for e in events}),
+            "by_category": _category_breakdown(counts, len(events)),
+            "operations": _operation_totals(events),
+            "security": _security_summary(events, counts),
+            "performance": _performance_summary(events, counts),
+            "recent_events": _recent_events(events, recent),
         }
+
+
+# ---- metric builders (pure functions over the event list) ------------------------
+def _percent(part: int, total: int) -> float:
+    return round(100 * part / total, 1) if total else 0.0
+
+
+def _category_breakdown(counts: Counter, total: int) -> list[dict[str, Any]]:
+    return [
+        {"category": c, "label": messages.CATEGORY_LABELS[c], "total": counts[c], "pct": _percent(counts[c], total)}
+        for c in CATEGORIES
+    ]
+
+
+def _count_successful(events: list[dict[str, Any]], tool_name: str) -> int:
+    return sum(1 for e in events for t in e["tools"] if t["ok"] and t["name"] == tool_name)
+
+
+def _operation_totals(events: list[dict[str, Any]]) -> dict[str, Any]:
+    deposit_volume = sum((Decimal(e["deposit_volume"]) for e in events), Decimal("0"))
+    transfer_volume = sum((Decimal(e["transfer_volume"]) for e in events), Decimal("0"))
+    return {
+        "deposits": _count_successful(events, tools.DEPOSIT),
+        "transfers": _count_successful(events, tools.CONFIRM_OPERATION),
+        "deposit_volume": format_brl(deposit_volume),
+        "transfer_volume": format_brl(transfer_volume),
+    }
+
+
+def _security_summary(events: list[dict[str, Any]], counts: Counter) -> dict[str, Any]:
+    injections = [e for e in events if e["injection_suspected"]]
+    validation_errors = Counter(t["error"] for e in events for t in e["tools"] if not t["ok"] and t.get("error"))
+    return {
+        "out_of_scope_refusals": counts["OUT_OF_SCOPE_REFUSAL"],
+        "injection_attempts": len(injections),
+        "injections_that_changed_balance": sum(1 for e in injections if e["changed_balance"]),
+        "blocked_validations": dict(validation_errors),
+        "output_guardrail_triggered": counts["OUTPUT_GUARDRAIL"],
+        "blocked_inputs": counts["INPUT_BLOCKED"],
+    }
+
+
+def _performance_summary(events: list[dict[str, Any]], counts: Counter) -> dict[str, Any]:
+    latencies = sorted(e["latency_ms"] for e in events if e["category"] != "INPUT_BLOCKED")
+    p95_index = min(len(latencies) - 1, int(len(latencies) * 0.95)) if latencies else 0
+    return {
+        "avg_latency_ms": round(sum(latencies) / len(latencies)) if latencies else 0,
+        "p95_latency_ms": latencies[p95_index] if latencies else 0,
+        "technical_error_rate_pct": _percent(counts["TECHNICAL_ERROR"], len(events)),
+    }
+
+
+_RECENT_FIELDS = (
+    "ts",
+    "session",
+    "message",
+    "category",
+    "tools",
+    "injection_suspected",
+    "output_guardrail",
+    "latency_ms",
+    "balance_after",
+)
+
+
+_REQUIRED_EVENT_KEYS = frozenset(_RECENT_FIELDS) | {"deposit_volume", "transfer_volume", "changed_balance"}
+
+
+def _parse_event(line: str) -> dict[str, Any] | None:
+    """Return the event, or None for corrupt lines and events written by an older schema.
+
+    Provenance: after the English refactor, audit.jsonl files from before it (Portuguese keys such as
+    `categoria`) crashed the dashboard with a KeyError. Old lines are skipped, not migrated.
+    """
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) and event.keys() >= _REQUIRED_EVENT_KEYS else None
+
+
+def _recent_events(events: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    return [{k: e[k] for k in _RECENT_FIELDS} for e in reversed(events[-limit:])]

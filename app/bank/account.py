@@ -1,308 +1,231 @@
-"""Conta bancária fictícia — TODA a regra de negócio vive aqui.
+"""Fictitious bank account: ALL business rules live here.
 
-O modelo de linguagem nunca altera o saldo diretamente: ele apenas pede, via
-ferramentas, que esta classe execute uma operação. A classe valida tudo e é a
-única fonte da verdade sobre saldo e extrato.
+The language model never changes the balance directly: through tools it only
+asks this class to run an operation. The class validates everything and is the
+single source of truth for balance and statement.
 
-Transferências são feitas em DUAS ETAPAS, com a regra imposta em código:
-  1. ``preparar_transferencia`` valida e cria uma operação pendente (não debita);
-  2. ``confirmar_transferencia`` só é aceita em um TURNO POSTERIOR do usuário,
-     ou seja, o usuário precisa ter enviado uma nova mensagem depois de ver o
-     resumo. Isso impede que o modelo "se auto-confirme" na mesma resposta.
+Transfers are two-step, and the rule is enforced in code:
+  1. `prepare_transfer` validates and creates a pending operation (no debit);
+  2. `confirm_transfer` is only accepted in a LATER user turn, i.e. the user
+     must have sent a new message after seeing the summary. This stops the model
+     from "self-confirming" inside the same reply.
 """
 
 from __future__ import annotations
 
-import re
 import threading
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
-from app.bank.money import ValorInvalidoError, format_brl, parse_valor
-from app.config import SALDO_INICIAL, TAMANHO_MAX_DESTINATARIO
+from app import messages
+from app.bank import models
+from app.bank.errors import (
+    ConfirmationNotAuthorizedError,
+    InsufficientBalanceError,
+    NoPendingOperationError,
+)
+from app.bank.models import PendingTransfer, Transaction
+from app.bank.money import format_brl, parse_amount
+from app.bank.recipient import validate_recipient
+from app.config import INITIAL_BALANCE
 
-NOME_CONTA = "Conta Corrente Imersão"
-NUMERO_CONTA = "0001 / 12345-6"
-
-
-# --- Erros de negócio ---------------------------------------------------------
-class OperacaoBancariaError(Exception):
-    codigo = "ERRO_OPERACAO"
-
-
-class SaldoInsuficienteError(OperacaoBancariaError):
-    codigo = "SALDO_INSUFICIENTE"
-
-
-class DestinoInvalidoError(OperacaoBancariaError):
-    codigo = "DESTINATARIO_INVALIDO"
+ToolResult = dict[str, Any]
 
 
-class SemOperacaoPendenteError(OperacaoBancariaError):
-    codigo = "SEM_OPERACAO_PENDENTE"
-
-
-class ConfirmacaoNaoAutorizadaError(OperacaoBancariaError):
-    codigo = "CONFIRMACAO_REQUER_USUARIO"
-
-
-# --- Modelos ------------------------------------------------------------------
-@dataclass(frozen=True)
-class Transacao:
-    tipo: str  # "DEPOSITO" | "TRANSFERENCIA"
-    valor: Decimal
-    saldo_apos: Decimal
-    destinatario: str | None = None
-    data_hora: str = field(default_factory=lambda: datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
-
-    def to_dict(self) -> dict:
-        return {
-            "tipo": self.tipo,
-            "valor": format_brl(self.valor),
-            "saldo_apos": format_brl(self.saldo_apos),
-            "destinatario": self.destinatario,
-            "data_hora": self.data_hora,
-        }
-
-
-@dataclass(frozen=True)
-class TransferenciaPendente:
-    operacao_id: str
-    valor: Decimal
-    destinatario: str
-    turno_criacao: int
-
-    def to_dict(self) -> dict:
-        return {
-            "operacao_id": self.operacao_id,
-            "valor": format_brl(self.valor),
-            "destinatario": self.destinatario,
-        }
-
-
-_PADRAO_DESTINATARIO = re.compile(r"^[\wÀ-ÿ][\wÀ-ÿ .,'\-/]*$")
-_AUTO_REFERENCIA = re.compile(r"(?i)\b(minha( própria| propria)? conta|eu mesmo|mim mesmo|para mim)\b")
-
-
-def validar_destinatario(destinatario: object) -> str:
-    if not isinstance(destinatario, str) or not destinatario.strip():
-        raise DestinoInvalidoError("Informe para quem deseja transferir (ex.: 'conta da Ana').")
-    nome = " ".join(destinatario.split())
-    if len(nome) > TAMANHO_MAX_DESTINATARIO:
-        raise DestinoInvalidoError(f"O destinatário deve ter no máximo {TAMANHO_MAX_DESTINATARIO} caracteres.")
-    if not _PADRAO_DESTINATARIO.match(nome):
-        raise DestinoInvalidoError("O destinatário contém caracteres inválidos.")
-    if _AUTO_REFERENCIA.search(nome):
-        raise DestinoInvalidoError("Não é possível transferir para a própria conta.")
-    return nome
-
-
-# --- Conta ---------------------------------------------------------------------
 class Account:
-    def __init__(self, saldo_inicial: Decimal = SALDO_INICIAL) -> None:
-        self._saldo_inicial = parse_valor(saldo_inicial)
-        self._saldo = self._saldo_inicial
-        self._extrato: list[Transacao] = []
-        self._pendente: TransferenciaPendente | None = None
-        self._turno = 0
+    def __init__(self, initial_balance: Decimal = INITIAL_BALANCE) -> None:
+        self._initial_balance = parse_amount(initial_balance)
+        self._balance = self._initial_balance
+        self._statement: list[Transaction] = []
+        self._pending: PendingTransfer | None = None
+        self._turn = 0
         self._lock = threading.RLock()
 
-    # ---- leitura ----
+    # ---- read ----
     @property
-    def saldo(self) -> Decimal:
-        return self._saldo
-
-    @property
-    def pendente(self) -> TransferenciaPendente | None:
-        return self._pendente
+    def balance(self) -> Decimal:
+        return self._balance
 
     @property
-    def extrato(self) -> list[Transacao]:
-        return list(self._extrato)
+    def pending(self) -> PendingTransfer | None:
+        return self._pending
 
-    def novo_turno_usuario(self) -> int:
-        """Chamado pelo agente sempre que chega uma NOVA mensagem do usuário."""
-        with self._lock:
-            self._turno += 1
-            return self._turno
+    @property
+    def statement(self) -> list[Transaction]:
+        return list(self._statement)
 
-    def consultar_saldo(self) -> dict:
+    def start_user_turn(self) -> int:
+        """Called by the agent whenever a NEW user message arrives."""
         with self._lock:
+            self._turn += 1
+            return self._turn
+
+    def get_balance(self) -> ToolResult:
+        with self._lock:
+            return {"ok": True, "account": messages.ACCOUNT_LABEL, "balance": format_brl(self._balance)}
+
+    # ---- deposit ----
+    def deposit(self, amount: object) -> ToolResult:
+        with self._lock:
+            value = parse_amount(amount)
+            previous = self._balance
+            self._balance = previous + value
+            self._statement.append(Transaction(models.DEPOSIT, value, self._balance))
+            self._check_invariants()
             return {
                 "ok": True,
-                "conta": f"{NOME_CONTA} ({NUMERO_CONTA})",
-                "saldo": format_brl(self._saldo),
+                "operation": models.DEPOSIT,
+                "deposited_amount": format_brl(value),
+                "previous_balance": format_brl(previous),
+                "new_balance": format_brl(self._balance),
             }
 
-    # ---- depósito ----
-    def depositar(self, valor: object) -> dict:
+    # ---- transfer, step 1 ----
+    def prepare_transfer(self, amount: object, recipient: object) -> ToolResult:
         with self._lock:
-            v = parse_valor(valor)
-            anterior = self._saldo
-            self._saldo = anterior + v
-            self._extrato.append(Transacao("DEPOSITO", v, self._saldo))
-            self._checar_invariantes()
+            value = parse_amount(amount)
+            name = validate_recipient(recipient)
+            self._require_funds(value)
+            self._pending = PendingTransfer(f"TRF-{uuid.uuid4().hex[:6].upper()}", value, name, self._turn)
+            return self._transfer_summary(self._pending)
+
+    def _require_funds(self, value: Decimal) -> None:
+        if value > self._balance:
+            raise InsufficientBalanceError(messages.insufficient_balance(format_brl(value), format_brl(self._balance)))
+
+    def _transfer_summary(self, pending: PendingTransfer) -> ToolResult:
+        return {
+            "ok": True,
+            "status": "AWAITING_USER_CONFIRMATION",
+            "operation_id": pending.operation_id,
+            "origin": messages.ACCOUNT_LABEL,
+            "recipient": pending.recipient,
+            "amount": format_brl(pending.amount),
+            "current_balance": format_brl(self._balance),
+            "balance_after_transfer": format_brl(self._balance - pending.amount),
+            # Read by the model: it must not confirm on its own (see class docstring).
+            "instruction": "Show this summary and ask the user to reply 'confirmo' or 'cancelar'. "
+            "Do NOT confirm on your own.",
+        }
+
+    # ---- transfer, step 2 ----
+    def confirm_transfer(self, operation_id: object) -> ToolResult:
+        with self._lock:
+            pending = self._require_pending(operation_id)
+            self._require_new_user_turn(pending)
+            self._require_funds_at_confirmation(pending)
+            previous = self._balance
+            self._apply_transfer(pending)
+            return self._transfer_receipt(pending, previous)
+
+    def _require_new_user_turn(self, pending: PendingTransfer) -> None:
+        if self._turn <= pending.created_in_turn:
+            raise ConfirmationNotAuthorizedError(messages.CONFIRMATION_REQUIRES_NEW_MESSAGE)
+
+    def _require_funds_at_confirmation(self, pending: PendingTransfer) -> None:
+        """Re-validate: the balance may have changed since the summary was shown."""
+        if pending.amount <= self._balance:
+            return
+        self._pending = None
+        raise InsufficientBalanceError(
+            messages.insufficient_balance_at_confirmation(format_brl(self._balance), format_brl(pending.amount))
+        )
+
+    def _apply_transfer(self, pending: PendingTransfer) -> None:
+        self._balance -= pending.amount
+        self._statement.append(Transaction(models.TRANSFER, pending.amount, self._balance, pending.recipient))
+        self._pending = None
+        self._check_invariants()
+
+    def _transfer_receipt(self, pending: PendingTransfer, previous: Decimal) -> ToolResult:
+        return {
+            "ok": True,
+            "operation": models.TRANSFER,
+            "status": "COMPLETED",
+            "operation_id": pending.operation_id,
+            "origin": messages.ACCOUNT_LABEL,
+            "recipient": pending.recipient,
+            "transferred_amount": format_brl(pending.amount),
+            "previous_balance": format_brl(previous),
+            "new_balance": format_brl(self._balance),
+        }
+
+    def cancel_transfer(self, operation_id: object) -> ToolResult:
+        with self._lock:
+            pending = self._require_pending(operation_id)
+            self._pending = None
             return {
                 "ok": True,
-                "operacao": "DEPOSITO",
-                "valor_depositado": format_brl(v),
-                "saldo_anterior": format_brl(anterior),
-                "novo_saldo": format_brl(self._saldo),
+                "status": "CANCELLED",
+                "operation_id": pending.operation_id,
+                "balance": format_brl(self._balance),
             }
 
-    # ---- transferência (etapa 1) ----
-    def preparar_transferencia(self, valor: object, destinatario: object) -> dict:
-        with self._lock:
-            v = parse_valor(valor)
-            nome = validar_destinatario(destinatario)
-            if v > self._saldo:
-                raise SaldoInsuficienteError(
-                    f"Saldo insuficiente: você tentou transferir {format_brl(v)}, "
-                    f"mas o saldo disponível é {format_brl(self._saldo)}."
-                )
-            self._pendente = TransferenciaPendente(
-                operacao_id=f"TRF-{uuid.uuid4().hex[:6].upper()}",
-                valor=v,
-                destinatario=nome,
-                turno_criacao=self._turno,
-            )
-            return {
-                "ok": True,
-                "status": "AGUARDANDO_CONFIRMACAO_DO_USUARIO",
-                "operacao_id": self._pendente.operacao_id,
-                "origem": f"{NOME_CONTA} ({NUMERO_CONTA})",
-                "destinatario": nome,
-                "valor": format_brl(v),
-                "saldo_atual": format_brl(self._saldo),
-                "saldo_apos_transferencia": format_brl(self._saldo - v),
-                "instrucao": "Mostre este resumo e peça ao usuário para responder 'confirmo' ou 'cancelar'. "
-                "NÃO confirme por conta própria.",
-            }
+    def _require_pending(self, operation_id: object) -> PendingTransfer:
+        pending = self._pending
+        if pending is None:
+            raise NoPendingOperationError(messages.NO_PENDING_TRANSFER)
+        if not isinstance(operation_id, str) or operation_id.strip().upper() != pending.operation_id:
+            raise NoPendingOperationError(messages.wrong_operation_id(pending.operation_id))
+        return pending
 
-    # ---- transferência (etapa 2) ----
-    def confirmar_transferencia(self, operacao_id: object) -> dict:
-        with self._lock:
-            p = self._exigir_pendente(operacao_id)
-            if self._turno <= p.turno_criacao:
-                raise ConfirmacaoNaoAutorizadaError(
-                    "A confirmação precisa vir do usuário em uma nova mensagem. "
-                    "Mostre o resumo e aguarde a resposta dele."
-                )
-            if p.valor > self._saldo:  # revalida: o saldo pode ter mudado
-                self._pendente = None
-                raise SaldoInsuficienteError(
-                    f"Saldo insuficiente no momento da confirmação: saldo {format_brl(self._saldo)}, "
-                    f"transferência {format_brl(p.valor)}. A operação foi cancelada."
-                )
-            anterior = self._saldo
-            self._saldo = anterior - p.valor
-            self._extrato.append(Transacao("TRANSFERENCIA", p.valor, self._saldo, p.destinatario))
-            self._pendente = None
-            self._checar_invariantes()
-            return {
-                "ok": True,
-                "operacao": "TRANSFERENCIA",
-                "status": "CONCLUIDA",
-                "operacao_id": p.operacao_id,
-                "origem": f"{NOME_CONTA} ({NUMERO_CONTA})",
-                "destinatario": p.destinatario,
-                "valor_transferido": format_brl(p.valor),
-                "saldo_anterior": format_brl(anterior),
-                "novo_saldo": format_brl(self._saldo),
-            }
+    # ---- integrity ----
+    def _check_invariants(self) -> None:
+        """Defense in depth: the balance must ALWAYS match the statement."""
+        deposits = self._sum_of(models.DEPOSIT)
+        transfers = self._sum_of(models.TRANSFER)
+        expected = self._initial_balance + deposits - transfers
+        # if/raise instead of assert: asserts vanish when Python runs with -O.
+        if self._balance != expected:
+            raise RuntimeError(f"balance inconsistency: balance={self._balance}, expected={expected}")
+        if self._balance < 0:
+            raise RuntimeError(f"negative balance detected: {self._balance}")
 
-    def cancelar_transferencia(self, operacao_id: object) -> dict:
-        with self._lock:
-            p = self._exigir_pendente(operacao_id)
-            self._pendente = None
-            return {
-                "ok": True,
-                "status": "CANCELADA",
-                "operacao_id": p.operacao_id,
-                "saldo": format_brl(self._saldo),
-            }
+    def _sum_of(self, transaction_type: str) -> Decimal:
+        return sum((t.amount for t in self._statement if t.type == transaction_type), Decimal("0"))
 
-    # ---- auxiliares ----
-    def _exigir_pendente(self, operacao_id: object) -> TransferenciaPendente:
-        p = self._pendente
-        if p is None:
-            raise SemOperacaoPendenteError("Não há nenhuma transferência aguardando confirmação.")
-        if not isinstance(operacao_id, str) or operacao_id.strip().upper() != p.operacao_id:
-            raise SemOperacaoPendenteError(
-                f"Identificador de operação inválido. A operação pendente é {p.operacao_id}."
-            )
-        return p
-
-    def _checar_invariantes(self) -> None:
-        """Defesa em profundidade: o saldo deve SEMPRE bater com o extrato."""
-        depositos = sum((t.valor for t in self._extrato if t.tipo == "DEPOSITO"), Decimal("0"))
-        transferencias = sum((t.valor for t in self._extrato if t.tipo == "TRANSFERENCIA"), Decimal("0"))
-        esperado = self._saldo_inicial + depositos - transferencias
-        # (if/raise em vez de assert: asserts somem quando o Python roda com -O)
-        if self._saldo != esperado:
-            raise RuntimeError("Inconsistência de saldo detectada")
-        if self._saldo < 0:
-            raise RuntimeError("Saldo negativo detectado")
-
-    # ---- persistência ----
-    def to_dict(self) -> dict:
-        """Serializa o estado (valores como texto Decimal, nunca float)."""
+    # ---- persistence ----
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the state (Decimals as text, never floats)."""
         with self._lock:
             return {
-                "saldo_inicial": str(self._saldo_inicial),
-                "saldo": str(self._saldo),
-                "turno": self._turno,
-                "extrato": [
-                    {"tipo": t.tipo, "valor": str(t.valor), "saldo_apos": str(t.saldo_apos),
-                     "destinatario": t.destinatario, "data_hora": t.data_hora}
-                    for t in self._extrato
-                ],
-                "pendente": None if self._pendente is None else {
-                    "operacao_id": self._pendente.operacao_id, "valor": str(self._pendente.valor),
-                    "destinatario": self._pendente.destinatario, "turno_criacao": self._pendente.turno_criacao,
-                },
+                "initial_balance": str(self._initial_balance),
+                "balance": str(self._balance),
+                "turn": self._turn,
+                "statement": [t.to_storage() for t in self._statement],
+                "pending": self._pending.to_storage() if self._pending else None,
             }
 
     @classmethod
-    def from_dict(cls, dados: dict) -> "Account":
-        """Reconstrói a conta e VALIDA a consistência: um arquivo adulterado ou
-        corrompido (saldo que não bate com o extrato, negativo...) é rejeitado."""
-        conta = cls(Decimal(dados["saldo_inicial"]))
-        conta._saldo = Decimal(dados["saldo"])
-        conta._turno = int(dados.get("turno", 0))
-        for t in dados.get("extrato", []):
-            if t["tipo"] not in ("DEPOSITO", "TRANSFERENCIA"):
-                raise ValueError("tipo de transação inválido")
-            conta._extrato.append(Transacao(
-                t["tipo"], parse_valor(t["valor"]), Decimal(t["saldo_apos"]), t.get("destinatario"), t["data_hora"]
-            ))
-        p = dados.get("pendente")
-        if p:
-            conta._pendente = TransferenciaPendente(
-                p["operacao_id"], parse_valor(p["valor"]), validar_destinatario(p["destinatario"]),
-                int(p["turno_criacao"]),
-            )
-        conta._checar_invariantes()
-        return conta
+    def from_dict(cls, data: dict[str, Any]) -> Account:
+        """Rebuild the account and VALIDATE its consistency: a tampered or corrupt
+        file (balance not matching the statement, negative...) is rejected."""
+        account = cls(Decimal(data["initial_balance"]))
+        account._balance = Decimal(data["balance"])
+        account._turn = int(data.get("turn", 0))
+        account._statement = [Transaction.from_storage(t) for t in data.get("statement", [])]
+        account._pending = cls._restore_pending(data.get("pending"))
+        account._check_invariants()
+        return account
 
-    def snapshot(self) -> dict:
+    @staticmethod
+    def _restore_pending(data: dict[str, Any] | None) -> PendingTransfer | None:
+        if not data:
+            return None
+        return PendingTransfer(
+            data["operation_id"],
+            parse_amount(data["amount"]),
+            validate_recipient(data["recipient"]),
+            int(data["created_in_turn"]),
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        """State sent to the frontend; always comes from here, never from model text."""
         with self._lock:
             return {
-                "conta": f"{NOME_CONTA} ({NUMERO_CONTA})",
-                "saldo": format_brl(self._saldo),
-                "extrato": [t.to_dict() for t in reversed(self._extrato)],
-                "pendente": self._pendente.to_dict() if self._pendente else None,
+                "account": messages.ACCOUNT_LABEL,
+                "balance": format_brl(self._balance),
+                "statement": [t.to_public() for t in reversed(self._statement)],
+                "pending": self._pending.to_public() if self._pending else None,
             }
-
-
-__all__ = [
-    "Account",
-    "OperacaoBancariaError",
-    "SaldoInsuficienteError",
-    "DestinoInvalidoError",
-    "SemOperacaoPendenteError",
-    "ConfirmacaoNaoAutorizadaError",
-    "ValorInvalidoError",
-]

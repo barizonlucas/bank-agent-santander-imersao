@@ -1,167 +1,189 @@
-"""Guardrail de SAÍDA: verifica os valores monetários no texto gerado pela IA.
+"""OUTPUT guardrail: checks the monetary amounts in the text the AI generated.
 
-Mesmo com o saldo calculado em código, o modelo ainda ESCREVE a resposta e
-poderia "alucinar" um número (ex.: "seu saldo é R$ 1.300,00" quando é
-R$ 1.250,00). Este módulo extrai todo valor em reais do texto e só aprova a
-resposta se CADA valor vier de uma fonte confiável:
+Even with the balance computed in code, the model still WRITES the reply and
+could "hallucinate" a number (e.g. "your balance is R$ 1.300,00" when it is
+R$ 1.250,00). This module extracts every amount in reais from the text and only
+approves the reply if EACH amount comes from a trusted source:
 
-  * resultados das ferramentas (deste turno e de turnos anteriores da sessão);
-  * estado real da conta (saldo, saldo inicial, pendência, extrato);
-  * valores digitados pelo próprio usuário;
-  * constantes de regra (limite por operação).
+  * tool results (this turn and earlier turns of the session);
+  * the real account state (balance, initial balance, pending transfer, statement);
+  * amounts typed by the user themselves;
+  * rule constants (per-operation limit).
 
-Se algo não bater, a resposta é substituída por uma mensagem determinística
-montada a partir dos resultados das ferramentas — nunca do texto do modelo.
+If anything does not match, the reply is replaced by a deterministic message
+built from the tool results, never from the model text.
+
+The regexes match PORTUGUESE text on purpose: that is the language the agent
+writes in ("R$ 1.234,56", "saldo atual").
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
+from collections.abc import Callable, Iterable
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
-from app.bank.account import Account
+from app import messages
+from app.agent import tools
+from app.bank.account import Account, ToolResult
 from app.bank.money import format_brl
-from app.config import LIMITE_POR_OPERACAO, SALDO_INICIAL
+from app.config import INITIAL_BALANCE, MAX_AMOUNT_PER_OPERATION
+
+CENT = Decimal("0.01")
+BALANCE_KEYS = ("new_balance", "balance", "current_balance")
 
 # "R$ 1.234,56" | "R$1.000" | "R$ 50" | "1.234,56 reais" | "250 reais"
-_VALOR_NO_TEXTO = re.compile(
-    r"R\$\s*-?\s*(\d[\d.,]*\d|\d)|(\d[\d.,]*\d|\d)\s*(?:reais|real)\b", re.IGNORECASE
-)
-_NUMERO_LIVRE = re.compile(r"\d[\d.,]*\d|\d")
-
-
-def _parse_br(texto: str) -> Decimal | None:
-    """Interpreta um número escrito no padrão brasileiro (como a IA deve escrever)."""
-    t = texto.strip().rstrip(".,")
-    try:
-        if "," in t:  # 1.234,56 -> 1234.56
-            if t.count(",") > 1:
-                return None
-            return Decimal(t.replace(".", "").replace(",", "."))
-        if re.fullmatch(r"\d{1,3}(\.\d{3})+", t):  # 1.000 -> 1000
-            return Decimal(t.replace(".", ""))
-        if re.fullmatch(r"\d+", t):
-            return Decimal(t)
-    except InvalidOperation:
-        return None
-    return None
-
-
-def _interpretacoes_usuario(token: str) -> set[Decimal]:
-    """O usuário pode escrever '50.5' (ponto decimal) ou '1.000' (milhar): aceitamos ambas."""
-    valores = set()
-    br = _parse_br(token)
-    if br is not None:
-        valores.add(br)
-    try:
-        valores.add(Decimal(token.replace(",", "")))
-    except InvalidOperation:
-        pass
-    return valores
-
-
-def extrair_valores(texto: str) -> list[tuple[str, Decimal | None]]:
-    """Retorna [(trecho_original, valor)] para cada menção monetária; valor None = ilegível."""
-    achados = []
-    for m in _VALOR_NO_TEXTO.finditer(texto or ""):
-        numero = m.group(1) or m.group(2)
-        achados.append((m.group(0).strip(), _parse_br(numero)))
-    return achados
-
-
-def _valores_em(obj) -> set[Decimal]:
-    """Coleta valores monetários de qualquer estrutura (resultados de ferramentas)."""
-    if isinstance(obj, dict):
-        return set().union(*(_valores_em(v) for v in obj.values())) if obj else set()
-    if isinstance(obj, (list, tuple)):
-        return set().union(*(_valores_em(v) for v in obj)) if obj else set()
-    if isinstance(obj, str):
-        return {v for _, v in extrair_valores(obj) if v is not None}
-    return set()
-
-
-def valores_do_usuario(mensagem: str) -> set[Decimal]:
-    valores: set[Decimal] = set()
-    for token in _NUMERO_LIVRE.findall(mensagem or ""):
-        valores |= _interpretacoes_usuario(token)
-    return valores
-
-
-def valores_permitidos(conta: Account, resultados: list[dict], mensagem_usuario: str,
-                       confiaveis_sessao: set[Decimal] | None = None) -> set[Decimal]:
-    permitidos: set[Decimal] = {conta.saldo, SALDO_INICIAL, LIMITE_POR_OPERACAO}
-    if conta.pendente:
-        permitidos |= {conta.pendente.valor, conta.saldo - conta.pendente.valor}
-    for t in conta.extrato:
-        permitidos |= {t.valor, t.saldo_apos}
-    permitidos |= _valores_em(resultados)
-    permitidos |= valores_do_usuario(mensagem_usuario)
-    permitidos |= confiaveis_sessao or set()
-    return {v.quantize(Decimal("0.01")) for v in permitidos}
-
-
+_AMOUNT_IN_TEXT = re.compile(r"R\$\s*-?\s*(\d[\d.,]*\d|\d)|(\d[\d.,]*\d|\d)\s*(?:reais|real)\b", re.IGNORECASE)
+_FREE_NUMBER = re.compile(r"\d[\d.,]*\d|\d")
 # "saldo atual: R$ X", "seu saldo é de R$ X", "novo saldo: R$ X", "saldo disponível R$ X"
-_MENCAO_SALDO = re.compile(
+_BALANCE_CLAIM = re.compile(
     r"(saldo\s+atual|seu\s+saldo|novo\s+saldo|saldo\s+dispon[ií]vel|saldo\s+da\s+(?:sua\s+)?conta)"
     r"[^R\d\n]{0,30}R\$\s*(\d[\d.,]*\d|\d)",
     re.IGNORECASE,
 )
 
 
-def saldos_validos(conta: Account, resultados: list[dict]) -> set[Decimal]:
-    """Valores aceitos quando o texto afirma qual É o saldo: o saldo real agora, ou o
-    'novo_saldo' de uma operação deste mesmo turno (resposta com várias operações)."""
-    validos = {conta.saldo}
-    for r in resultados:
-        if r.get("ok"):
-            for chave in ("novo_saldo", "saldo", "saldo_atual"):
-                if chave in r:
-                    validos |= {v for _, v in extrair_valores(r[chave]) if v is not None}
-    return {v.quantize(Decimal("0.01")) for v in validos}
+# ---- parsing --------------------------------------------------------------------
+def parse_br_number(text: str) -> Decimal | None:
+    """Parse a number written in the Brazilian standard (how the AI should write it)."""
+    try:
+        return _parse_cleaned(text.strip().rstrip(".,"))
+    except InvalidOperation:
+        return None
 
 
-def verificar(texto: str, permitidos: set[Decimal], saldos: set[Decimal] | None = None) -> list[str]:
-    """Retorna a lista de trechos SUSPEITOS (vazia = resposta aprovada).
+def _parse_cleaned(text: str) -> Decimal | None:
+    if "," in text:
+        return None if text.count(",") > 1 else Decimal(text.replace(".", "").replace(",", "."))
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+", text):  # 1.000 -> 1000
+        return Decimal(text.replace(".", ""))
+    return Decimal(text) if re.fullmatch(r"\d+", text) else None
 
-    Duas checagens:
-      1. todo valor em reais precisa estar entre os valores confiáveis;
-      2. se o texto AFIRMA o saldo atual/novo, o valor precisa ser o saldo real
-         (pega saldo desatualizado, não só valor inventado).
+
+def _user_readings(token: str) -> set[Decimal]:
+    """The user may write '50.5' (decimal point) or '1.000' (thousands): accept both."""
+    readings = set()
+    brazilian = parse_br_number(token)
+    if brazilian is not None:
+        readings.add(brazilian)
+    with contextlib.suppress(InvalidOperation):
+        readings.add(Decimal(token.replace(",", "")))
+    return readings
+
+
+def extract_amounts(text: str) -> list[tuple[str, Decimal | None]]:
+    """Return [(original_snippet, amount)] for each monetary mention; None = unreadable."""
+    found = []
+    for match in _AMOUNT_IN_TEXT.finditer(text or ""):
+        number = match.group(1) or match.group(2)
+        found.append((match.group(0).strip(), parse_br_number(number)))
+    return found
+
+
+def _amounts_in(obj: Any) -> set[Decimal]:
+    """Collect monetary amounts from any structure (tool results)."""
+    if isinstance(obj, dict):
+        return set().union(*(_amounts_in(v) for v in obj.values()))
+    if isinstance(obj, (list, tuple)):
+        return set().union(*(_amounts_in(v) for v in obj))
+    if isinstance(obj, str):
+        return {amount for _, amount in extract_amounts(obj) if amount is not None}
+    return set()
+
+
+def user_amounts(message: str) -> set[Decimal]:
+    amounts: set[Decimal] = set()
+    for token in _FREE_NUMBER.findall(message or ""):
+        amounts |= _user_readings(token)
+    return amounts
+
+
+def _quantized(amounts: Iterable[Decimal]) -> set[Decimal]:
+    return {amount.quantize(CENT) for amount in amounts}
+
+
+# ---- trusted sources ------------------------------------------------------------
+def allowed_amounts(account: Account, tool_results: list[ToolResult], user_message: str) -> set[Decimal]:
+    allowed = {account.balance, INITIAL_BALANCE, MAX_AMOUNT_PER_OPERATION}
+    allowed |= _pending_amounts(account)
+    for transaction in account.statement:
+        allowed |= {transaction.amount, transaction.balance_after}
+    allowed |= _amounts_in(tool_results)
+    allowed |= user_amounts(user_message)
+    return _quantized(allowed)
+
+
+def _pending_amounts(account: Account) -> set[Decimal]:
+    if account.pending is None:
+        return set()
+    return {account.pending.amount, account.balance - account.pending.amount}
+
+
+def valid_balances(account: Account, tool_results: list[ToolResult]) -> set[Decimal]:
+    """Amounts accepted when the text CLAIMS what the balance is: the real balance now,
+    or the `new_balance` of an operation in this same turn (multi-operation replies)."""
+    valid = {account.balance}
+    for result in tool_results:
+        valid |= _balances_in(result)
+    return _quantized(valid)
+
+
+def _balances_in(result: ToolResult) -> set[Decimal]:
+    if not result.get("ok"):
+        return set()
+    return set().union(*(_amounts_in(result[key]) for key in BALANCE_KEYS if key in result))
+
+
+# ---- verification ---------------------------------------------------------------
+def find_suspicious(text: str, allowed: set[Decimal], balances: set[Decimal] | None = None) -> list[str]:
+    """Return the SUSPICIOUS snippets (empty list = reply approved).
+
+    Two checks:
+      1. every amount in reais must be among the trusted amounts;
+      2. if the text CLAIMS the current/new balance, it must be the real balance
+         (this catches a stale balance, not only an invented amount).
     """
-    suspeitos = []
-    for trecho, valor in extrair_valores(texto):
-        if valor is None or valor.quantize(Decimal("0.01")) not in permitidos:
-            suspeitos.append(trecho)
-    if saldos is not None:
-        for m in _MENCAO_SALDO.finditer(texto or ""):
-            valor = _parse_br(m.group(2))
-            if valor is None or valor.quantize(Decimal("0.01")) not in saldos:
-                suspeitos.append(m.group(0).strip())
-    return list(dict.fromkeys(suspeitos))
+    suspicious = [
+        snippet for snippet, amount in extract_amounts(text) if amount is None or amount.quantize(CENT) not in allowed
+    ]
+    if balances is not None:
+        suspicious += _wrong_balance_claims(text, balances)
+    return list(dict.fromkeys(suspicious))
 
 
-def resposta_segura(conta: Account, resultados: list[tuple[str, dict]]) -> str:
-    """Mensagem 100% determinística, montada só com dados das ferramentas e da conta."""
-    linhas = []
-    for nome, r in resultados:
-        if not r.get("ok"):
-            linhas.append(r.get("mensagem", "Não foi possível concluir a operação."))
-        elif nome == "depositar":
-            linhas.append(f"Depósito de {r['valor_depositado']} realizado. Novo saldo: {r['novo_saldo']}.")
-        elif nome == "transferir":
-            linhas.append(
-                f"Transferência de {r['valor']} para {r['destinatario']} aguardando sua confirmação "
-                f"(saldo após a transferência: {r['saldo_apos_transferencia']}). Responda 'confirmo' ou 'cancelar'."
-            )
-        elif nome == "confirmar_operacao":
-            linhas.append(
-                f"Transferência de {r['valor_transferido']} para {r['destinatario']} concluída. "
-                f"Novo saldo: {r['novo_saldo']}."
-            )
-        elif nome == "cancelar_operacao":
-            linhas.append("Transferência cancelada. Nenhum valor foi debitado.")
-        elif nome == "consultar_saldo":
-            linhas.append(f"Seu saldo atual é {r['saldo']}.")
-    if not linhas:
-        linhas.append(f"Não consegui gerar uma resposta confiável. Seu saldo atual é {format_brl(conta.saldo)}.")
-    return " ".join(dict.fromkeys(linhas))  # remove duplicadas mantendo a ordem
+def _wrong_balance_claims(text: str, balances: set[Decimal]) -> list[str]:
+    claims = []
+    for match in _BALANCE_CLAIM.finditer(text or ""):
+        amount = parse_br_number(match.group(2))
+        if amount is None or amount.quantize(CENT) not in balances:
+            claims.append(match.group(0).strip())
+    return claims
+
+
+# ---- deterministic fallback reply ----------------------------------------------
+_SAFE_LINES: dict[str, Callable[[ToolResult], str]] = {
+    tools.DEPOSIT: lambda r: messages.safe_deposit(r["deposited_amount"], r["new_balance"]),
+    tools.TRANSFER: lambda r: messages.safe_transfer_pending(r["amount"], r["recipient"], r["balance_after_transfer"]),
+    tools.CONFIRM_OPERATION: lambda r: messages.safe_transfer_done(
+        r["transferred_amount"], r["recipient"], r["new_balance"]
+    ),
+    tools.CANCEL_OPERATION: lambda r: messages.SAFE_TRANSFER_CANCELLED,
+    tools.GET_BALANCE: lambda r: messages.safe_balance(r["balance"]),
+}
+
+
+def _safe_line(tool_name: str, result: ToolResult) -> str | None:
+    if not result.get("ok"):
+        return result.get("message", messages.OPERATION_FAILED)
+    formatter = _SAFE_LINES.get(tool_name)
+    return formatter(result) if formatter else None
+
+
+def safe_reply(account: Account, executed: list[tuple[str, ToolResult]]) -> str:
+    """100% deterministic message, built only from tool results and the account."""
+    lines = [line for name, result in executed if (line := _safe_line(name, result))]
+    if not lines:
+        lines.append(messages.safe_unreliable_reply(format_brl(account.balance)))
+    return " ".join(dict.fromkeys(lines))  # drop duplicates, keep order

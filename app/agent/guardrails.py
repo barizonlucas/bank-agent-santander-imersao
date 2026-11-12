@@ -1,15 +1,13 @@
-"""Guardrails determinísticos aplicados ANTES do modelo (não dependem do LLM)."""
+"""Deterministic guardrails applied BEFORE the model (they do not depend on the LLM)."""
 
-from app.config import TAMANHO_MAX_MENSAGEM
+from app import messages
+from app.config import MAX_MESSAGE_LENGTH
 
 
-def validar_entrada(mensagem: object) -> str | None:
-    """Retorna uma mensagem de erro se a entrada for inaceitável, senão None."""
-    if not isinstance(mensagem, str) or not mensagem.strip():
-        return "Por favor, digite uma mensagem. Posso consultar seu saldo, fazer um depósito ou uma transferência."
-    if len(mensagem) > TAMANHO_MAX_MENSAGEM:
-        return (
-            f"Sua mensagem é muito longa (máximo de {TAMANHO_MAX_MENSAGEM} caracteres). "
-            "Escreva de forma objetiva qual operação deseja: consultar saldo, depositar ou transferir."
-        )
+def validate_user_message(message: object) -> str | None:
+    """Return a user-facing error text when the input is unacceptable, else None."""
+    if not isinstance(message, str) or not message.strip():
+        return messages.EMPTY_MESSAGE
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return messages.message_too_long(MAX_MESSAGE_LENGTH)
     return None
