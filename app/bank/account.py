@@ -92,9 +92,7 @@ class Account:
 
     def _require_funds(self, value: Decimal) -> None:
         if value > self._balance:
-            raise InsufficientBalanceError(
-                messages.insufficient_balance(format_brl(value), format_brl(self._balance))
-            )
+            raise InsufficientBalanceError(messages.insufficient_balance(format_brl(value), format_brl(self._balance)))
 
     def _transfer_summary(self, pending: PendingTransfer) -> ToolResult:
         return {

@@ -24,8 +24,17 @@ log = logging.getLogger("bank_agent.llm")
 ROUNDS = 2
 PAUSE_BETWEEN_ROUNDS_SECONDS = 2
 _TRANSIENT_MARKERS = (
-    "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL", "503", "UNAVAILABLE",
-    "504", "DEADLINE_EXCEEDED", "timed out", "timeout", "Timeout",
+    "429",
+    "RESOURCE_EXHAUSTED",
+    "500",
+    "INTERNAL",
+    "503",
+    "UNAVAILABLE",
+    "504",
+    "DEADLINE_EXCEEDED",
+    "timed out",
+    "timeout",
+    "Timeout",
 )
 
 

@@ -48,7 +48,9 @@ def hash_session_id(session_id: str) -> str:
 def _history_from_transcript(transcript: list[dict[str, Any]]) -> list[types.Content]:
     """Rebuild the LLM context from TEXT only (the real state comes from the account)."""
     contents = [
-        types.Content(role="user" if entry["role"] == "user" else "model", parts=[types.Part.from_text(text=entry["text"])])
+        types.Content(
+            role="user" if entry["role"] == "user" else "model", parts=[types.Part.from_text(text=entry["text"])]
+        )
         for entry in transcript[-MAX_HISTORY_MESSAGES:]
         if entry.get("text")
     ]

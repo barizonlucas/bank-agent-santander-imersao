@@ -1,7 +1,11 @@
 from decimal import Decimal
 
 from app.agent.output_guard import (
-    allowed_amounts, extract_amounts, find_suspicious, safe_reply, valid_balances,
+    allowed_amounts,
+    extract_amounts,
+    find_suspicious,
+    safe_reply,
+    valid_balances,
 )
 from app.bank.account import Account
 

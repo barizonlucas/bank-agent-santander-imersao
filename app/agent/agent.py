@@ -25,7 +25,6 @@ from app.agent.guardrails import validate_user_message
 from app.agent.llm_gateway import LlmGateway
 from app.agent.prompt import SYSTEM_PROMPT
 from app.bank.account import ToolResult
-from app.bank.money import format_brl
 from app.bank.sessions import Session
 from app.config import GEMINI_FALLBACK_MODELS, GEMINI_MODEL, MAX_HISTORY_MESSAGES, MAX_TOOL_ITERATIONS
 

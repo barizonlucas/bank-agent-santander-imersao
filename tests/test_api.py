@@ -44,7 +44,8 @@ def test_about_leaks_neither_key_nor_prompt(make_client):
 
 def test_history_and_governance(make_client):
     script = [
-        [tool_call("deposit", amount="250")], [text("Novo saldo: R$ 1.250,00.")],
+        [tool_call("deposit", amount="250")],
+        [text("Novo saldo: R$ 1.250,00.")],
         [text(SCOPE_REFUSAL)],
     ]
     client = make_client(make_agent(FakeClient(script)))

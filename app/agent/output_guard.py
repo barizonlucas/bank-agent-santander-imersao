@@ -19,6 +19,7 @@ writes in ("R$ 1.234,56", "saldo atual").
 
 from __future__ import annotations
 
+import contextlib
 import re
 from collections.abc import Callable, Iterable
 from decimal import Decimal, InvalidOperation
@@ -34,9 +35,7 @@ CENT = Decimal("0.01")
 BALANCE_KEYS = ("new_balance", "balance", "current_balance")
 
 # "R$ 1.234,56" | "R$1.000" | "R$ 50" | "1.234,56 reais" | "250 reais"
-_AMOUNT_IN_TEXT = re.compile(
-    r"R\$\s*-?\s*(\d[\d.,]*\d|\d)|(\d[\d.,]*\d|\d)\s*(?:reais|real)\b", re.IGNORECASE
-)
+_AMOUNT_IN_TEXT = re.compile(r"R\$\s*-?\s*(\d[\d.,]*\d|\d)|(\d[\d.,]*\d|\d)\s*(?:reais|real)\b", re.IGNORECASE)
 _FREE_NUMBER = re.compile(r"\d[\d.,]*\d|\d")
 # "saldo atual: R$ X", "seu saldo é de R$ X", "novo saldo: R$ X", "saldo disponível R$ X"
 _BALANCE_CLAIM = re.compile(
@@ -69,10 +68,8 @@ def _user_readings(token: str) -> set[Decimal]:
     brazilian = parse_br_number(token)
     if brazilian is not None:
         readings.add(brazilian)
-    try:
+    with contextlib.suppress(InvalidOperation):
         readings.add(Decimal(token.replace(",", "")))
-    except InvalidOperation:
-        pass
     return readings
 
 
@@ -149,8 +146,7 @@ def find_suspicious(text: str, allowed: set[Decimal], balances: set[Decimal] | N
          (this catches a stale balance, not only an invented amount).
     """
     suspicious = [
-        snippet for snippet, amount in extract_amounts(text)
-        if amount is None or amount.quantize(CENT) not in allowed
+        snippet for snippet, amount in extract_amounts(text) if amount is None or amount.quantize(CENT) not in allowed
     ]
     if balances is not None:
         suspicious += _wrong_balance_claims(text, balances)

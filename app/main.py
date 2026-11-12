@@ -19,7 +19,7 @@ from app.about import build_about
 from app.agent.agent import AgentReply, BankAgent, build_default_agent
 from app.bank.sessions import Session, SessionStore, hash_session_id
 from app.config import DATA_DIR, PROJECT_NAME
-from app.governance.audit import AuditLog
+from app.governance.audit import AuditLog, Exchange
 from app.logging_setup import configure_logging
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -50,10 +50,17 @@ def _state_of(session: Session) -> dict[str, Any]:
 
 def _audit_exchange(state, body: ChatRequest, session: Session, reply: AgentReply, tool_calls, latency_ms: int) -> None:
     state.audit.record(
-        session_hash=hash_session_id(body.session_id), message=body.message, reply_text=reply.text,
-        tool_calls=tool_calls, kind=reply.kind, output_guardrail_hits=reply.output_guardrail_hits,
-        latency_ms=latency_ms, model=reply.model or state.agent.model,
-        balance_after=session.account.snapshot()["balance"],
+        Exchange(
+            session_hash=hash_session_id(body.session_id),
+            message=body.message,
+            reply_text=reply.text,
+            tool_calls=tool_calls,
+            kind=reply.kind,
+            output_guardrail_hits=reply.output_guardrail_hits,
+            latency_ms=latency_ms,
+            model=reply.model or state.agent.model,
+            balance_after=session.account.snapshot()["balance"],
+        )
     )
 
 
@@ -69,8 +76,12 @@ def chat(body: ChatRequest, request: Request) -> dict[str, Any]:
     state.sessions.save(body.session_id)
     _audit_exchange(state, body, session, reply, tool_calls, latency_ms)
     # The account state comes from the backend, never from the model's text.
-    return {"reply": reply.text, "tools": tool_calls, "output_guardrail": reply.output_guardrail_hits,
-            **session.account.snapshot()}
+    return {
+        "reply": reply.text,
+        "tools": tool_calls,
+        "output_guardrail": reply.output_guardrail_hits,
+        **session.account.snapshot(),
+    }
 
 
 @api.get("/api/state")

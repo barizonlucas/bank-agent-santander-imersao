@@ -8,8 +8,14 @@ from typing import Any
 from app import messages
 from app.agent.tools import DECLARATIONS
 from app.config import (
-    AUTHOR_LINKEDIN, AUTHOR_NAME, COURSE_NAME, COURSE_URL, GEMINI_FALLBACK_MODELS, GEMINI_MODEL,
-    MAX_TOOL_ITERATIONS, PROJECT_NAME,
+    AUTHOR_LINKEDIN,
+    AUTHOR_NAME,
+    COURSE_NAME,
+    COURSE_URL,
+    GEMINI_FALLBACK_MODELS,
+    GEMINI_MODEL,
+    MAX_TOOL_ITERATIONS,
+    PROJECT_NAME,
 )
 
 

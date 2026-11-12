@@ -15,6 +15,7 @@ import json
 import re
 import threading
 from collections import Counter, deque
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -104,6 +105,38 @@ def _summarize_tools(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+@dataclass(frozen=True)
+class Exchange:
+    """Everything the audit needs to know about one user message and the agent's answer."""
+
+    session_hash: str
+    message: str
+    reply_text: str
+    tool_calls: list[dict[str, Any]]
+    kind: str | None
+    output_guardrail_hits: list[str]
+    latency_ms: int
+    model: str
+    balance_after: str
+
+
+def _describe_exchange(exchange: Exchange, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """The part of an audit event that is derived from the exchange itself."""
+    volumes = _volumes(summaries)
+    category = classify(exchange.reply_text or "", summaries, exchange.kind, exchange.output_guardrail_hits)
+    return {
+        "message": (exchange.message or "")[:200],
+        "reply": (exchange.reply_text or "")[:300],
+        "category": category,
+        "tools": [{k: v for k, v in t.items() if k != "result"} for t in summaries],
+        "injection_suspected": is_injection_suspected(exchange.message),
+        "changed_balance": any(t["ok"] and t["name"] in tools.BALANCE_CHANGING_TOOLS for t in summaries),
+        "output_guardrail": exchange.output_guardrail_hits,
+        "deposit_volume": str(volumes["deposits"]),
+        "transfer_volume": str(volumes["transfers"]),
+    }
+
+
 class AuditLog:
     def __init__(self, file: Path | None = None, capacity: int = 1000) -> None:
         self._events: deque[dict[str, Any]] = deque(maxlen=capacity)
@@ -122,27 +155,15 @@ class AuditLog:
             except json.JSONDecodeError:
                 continue
 
-    def record(
-        self, *, session_hash: str, message: str, reply_text: str, tool_calls: list[dict[str, Any]],
-        kind: str | None, output_guardrail_hits: list[str], latency_ms: int, model: str, balance_after: str,
-    ) -> dict[str, Any]:
-        summaries = _summarize_tools(tool_calls)
-        volumes = _volumes(summaries)
+    def record(self, exchange: Exchange) -> dict[str, Any]:
+        summaries = _summarize_tools(exchange.tool_calls)
         event = {
             "ts": datetime.now().isoformat(timespec="seconds"),
-            "session": session_hash,
-            "message": (message or "")[:200],
-            "reply": (reply_text or "")[:300],
-            "category": classify(reply_text or "", summaries, kind, output_guardrail_hits),
-            "tools": [{k: v for k, v in t.items() if k != "result"} for t in summaries],
-            "injection_suspected": is_injection_suspected(message),
-            "changed_balance": any(t["ok"] and t["name"] in tools.BALANCE_CHANGING_TOOLS for t in summaries),
-            "output_guardrail": output_guardrail_hits,
-            "deposit_volume": str(volumes["deposits"]),
-            "transfer_volume": str(volumes["transfers"]),
-            "latency_ms": latency_ms,
-            "model": model,
-            "balance_after": balance_after,
+            "session": exchange.session_hash,
+            **_describe_exchange(exchange, summaries),
+            "latency_ms": exchange.latency_ms,
+            "model": exchange.model,
+            "balance_after": exchange.balance_after,
         }
         self._append(event)
         return event
@@ -219,8 +240,17 @@ def _performance_summary(events: list[dict[str, Any]], counts: Counter) -> dict[
     }
 
 
-_RECENT_FIELDS = ("ts", "session", "message", "category", "tools", "injection_suspected",
-                  "output_guardrail", "latency_ms", "balance_after")
+_RECENT_FIELDS = (
+    "ts",
+    "session",
+    "message",
+    "category",
+    "tools",
+    "injection_suspected",
+    "output_guardrail",
+    "latency_ms",
+    "balance_after",
+)
 
 
 def _recent_events(events: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:

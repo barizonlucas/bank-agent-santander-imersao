@@ -73,8 +73,7 @@ def message_too_long(max_length: int) -> str:
 # --- Agent replies -----------------------------------------------------------
 DEFAULT_REPLY = "Posso ajudar você a consultar o saldo, fazer um depósito ou uma transferência. O que deseja?"
 SCOPE_REFUSAL = (
-    "Desculpe, só posso ajudar com operações da sua conta: consultar saldo, depositar ou transferir. "
-    "Como posso ajudar?"
+    "Desculpe, só posso ajudar com operações da sua conta: consultar saldo, depositar ou transferir. Como posso ajudar?"
 )
 CANNOT_COMPLETE_REQUEST = "Não consegui concluir seu pedido."
 MODEL_UNAVAILABLE = "O serviço de IA está temporariamente indisponível."
