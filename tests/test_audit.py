@@ -80,3 +80,12 @@ def test_metrics_and_jsonl(tmp_path):
     # Server restart: the audit history is reloaded from the file
     assert AuditLog(file).metrics()["total_messages"] == 6
     assert Decimal(json.loads(lines[1])["deposit_volume"]) == Decimal("0.10")
+
+
+def test_events_from_an_older_schema_and_corrupt_lines_are_skipped(tmp_path):
+    file = tmp_path / "audit.jsonl"
+    file.write_text('{"categoria": "OPERACAO", "mensagem": "old"}\nnot json\n', encoding="utf-8")
+    log = AuditLog(file)
+    record(log, "Depositar 1", "ok", [("deposit", {"ok": True, "deposited_amount": "R$ 1,00"})])
+    assert log.metrics()["total_messages"] == 1
+    assert AuditLog(file).metrics()["total_messages"] == 1

@@ -150,10 +150,9 @@ class AuditLog:
         if not self._file.exists():
             return
         for line in self._file.read_text(encoding="utf-8").splitlines()[-self._events.maxlen :]:
-            try:
-                self._events.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            event = _parse_event(line)
+            if event is not None:
+                self._events.append(event)
 
     def record(self, exchange: Exchange) -> dict[str, Any]:
         summaries = _summarize_tools(exchange.tool_calls)
@@ -251,6 +250,22 @@ _RECENT_FIELDS = (
     "latency_ms",
     "balance_after",
 )
+
+
+_REQUIRED_EVENT_KEYS = frozenset(_RECENT_FIELDS) | {"deposit_volume", "transfer_volume", "changed_balance"}
+
+
+def _parse_event(line: str) -> dict[str, Any] | None:
+    """Return the event, or None for corrupt lines and events written by an older schema.
+
+    Provenance: after the English refactor, audit.jsonl files from before it (Portuguese keys such as
+    `categoria`) crashed the dashboard with a KeyError. Old lines are skipped, not migrated.
+    """
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) and event.keys() >= _REQUIRED_EVENT_KEYS else None
 
 
 def _recent_events(events: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
