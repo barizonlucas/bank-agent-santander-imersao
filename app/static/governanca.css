@@ -1,0 +1,36 @@
+/* Painel de governança — mesma paleta (tokens em styles.css). */
+body { min-height: 100vh; }
+.updated { font-size: 12px; opacity: .9; align-self: center; }
+.gov { max-width: 1240px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+.kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.kpi { background: var(--white); border: 1px solid var(--rio); border-top: 4px solid var(--santander-red); border-radius: 12px; padding: 14px; }
+.kpi.alert { background: var(--rio); border-color: var(--mexico-city); border-top-color: var(--london); }
+.kpi-v { font-size: 32px; font-weight: 700; color: var(--santander-red); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.kpi-v.sm { font-size: 24px; }
+.kpi.alert .kpi-v { color: var(--london); }
+.kpi-s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.bars { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.bars li { display: grid; grid-template-columns: 210px 1fr 48px; align-items: center; gap: 10px; font-size: 14px; }
+.track { height: 10px; background: var(--lisbon); border-radius: 999px; overflow: hidden; }
+.fill { height: 100%; background: var(--santander-red); border-radius: 999px; transition: width .5s ease; }
+.fill.c-RECUSA_ESCOPO, .fill.c-VALIDACAO_BLOQUEADA, .fill.c-ENTRADA_BLOQUEADA { background: var(--madrid); }
+.fill.c-GUARDRAIL_SAIDA, .fill.c-ERRO_TECNICO { background: var(--london); }
+.fill.c-CONSULTA, .fill.c-ESCLARECIMENTO { background: var(--mexico-city); }
+.bars .n { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--rio); vertical-align: top; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); font-weight: 600; }
+td.msg { max-width: 360px; }
+.pill { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--rio); background: var(--lisbon); white-space: nowrap; }
+.pill.OPERACAO { background: var(--santander-red); color: var(--white); border-color: var(--santander-red); }
+.pill.RECUSA_ESCOPO, .pill.VALIDACAO_BLOQUEADA, .pill.ENTRADA_BLOQUEADA { border-color: var(--madrid); color: var(--london); background: var(--white); }
+.pill.GUARDRAIL_SAIDA, .pill.ERRO_TECNICO { background: var(--rio); color: var(--london); border-color: var(--mexico-city); }
+.pill.inj { background: var(--white); color: var(--london); border: 1px dashed var(--london); margin-left: 4px; }
+.mono { font: 12px ui-monospace, Menlo, monospace; }
+@media (max-width: 960px) {
+  .kpis { grid-template-columns: repeat(2, 1fr); }
+  .grid2 { grid-template-columns: 1fr; }
+  .bars li { grid-template-columns: 140px 1fr 40px; }
+}
